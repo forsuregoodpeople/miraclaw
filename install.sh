@@ -53,6 +53,44 @@ require() {
     command -v "$1" &>/dev/null || die "$1 is required but not installed. Install it and re-run."
 }
 
+install_go() {
+    info "Go not found. Installing Go..."
+    
+    GO_VERSION="1.24.2"  # Latest stable as of April 2025
+    ARCH=$(uname -m)
+    
+    case "$ARCH" in
+        x86_64)  GO_ARCH="linux-amd64" ;;
+        aarch64) GO_ARCH="linux-arm64" ;;
+        armv7l)  GO_ARCH="linux-armv6l" ;;
+        *)       die "Unsupported architecture for Go install: $ARCH" ;;
+    esac
+    
+    TMP=$(mktemp -d)
+    trap 'rm -rf "$TMP"' EXIT
+    
+    GO_TARBALL="go${GO_VERSION}.${GO_ARCH}.tar.gz"
+    GO_URL="https://go.dev/dl/${GO_TARBALL}"
+    
+    info "Downloading Go ${GO_VERSION} for ${GO_ARCH}..."
+    curl -fsSL "$GO_URL" -o "$TMP/$GO_TARBALL" || die "Failed to download Go"
+    
+    info "Extracting Go to /usr/local..."
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "$TMP/$GO_TARBALL" || die "Failed to extract Go"
+    
+    # Add Go to PATH for this session
+    export PATH=$PATH:/usr/local/go/bin
+    
+    # Verify installation
+    if command -v go &>/dev/null; then
+        INSTALLED_VER=$(go version | awk '{print $3}')
+        success "Go installed: $INSTALLED_VER"
+    else
+        die "Go installation failed"
+    fi
+}
+
 # ── checks ───────────────────────────────────────────────────────────────────
 
 print_banner
@@ -60,8 +98,12 @@ print_banner
 [[ "$EUID" -eq 0 ]] || die "Run as root: sudo bash install.sh"
 
 require curl
-require go
 require git
+
+# Install Go if not present
+if ! command -v go &>/dev/null; then
+    install_go
+fi
 require systemctl
 
 # Go version check
