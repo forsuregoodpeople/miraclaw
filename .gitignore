@@ -12,3 +12,24 @@ miraclaw
 # macOS
 .DS_Store
 
+# Linux temp files
+.fuse_hidden*
+*~
+
+# Go
+*.exe
+*.dll
+*.so
+*.dylib
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Test binary
+*.test
+
