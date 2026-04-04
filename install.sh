@@ -8,7 +8,7 @@ QDRANT_CONFIG_DIR="/etc/qdrant"
 QDRANT_SERVICE="/etc/systemd/system/qdrant.service"
 MIRACLAW_SERVICE="/etc/systemd/system/miraclaw.service"
 MIRACLAW_BIN="$INSTALL_DIR/miraclaw"
-MIRACLAW_REPO="${MIRACLAW_REPO:-https://github.com/nicholasgasior/MiraClaw}"
+MIRACLAW_REPO="${MIRACLAW_REPO:-https://github.com/forsuregoodpeople/miraclaw.git}"
 MIRACLAW_SRC="/usr/local/src/miraclaw"
 GO_MIN="1.26"
 
