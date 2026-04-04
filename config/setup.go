@@ -148,6 +148,7 @@ func RunSetup(cfg *Config) error {
 					huh.NewOption("Same as LLM provider (recommended)", ""),
 					huh.NewOption("OpenAI (text-embedding-3-small)", "openai"),
 					huh.NewOption("Google Gemini (gemini-embedding-001)", "gemini"),
+					huh.NewOption("Local (no API key, basic quality)", "local"),
 				).
 				Value(&embedProvider),
 		),
@@ -157,7 +158,10 @@ func RunSetup(cfg *Config) error {
 	}
 	cfg.Embedder.Provider = embedProvider
 
-	if embedProvider != "" && embedProvider != llmProvider {
+	if embedProvider == "local" {
+		// Local embedder doesn't need API key
+		cfg.Embedder.APIKey = ""
+	} else if embedProvider != "" && embedProvider != llmProvider {
 		embedKey := cfg.Embedder.APIKey
 		err = huh.NewForm(
 			huh.NewGroup(

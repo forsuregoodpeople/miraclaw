@@ -236,21 +236,48 @@ func embedderProviderSupportsEmbedding(provider string) bool {
 	}
 }
 
+// useLocalEmbedder reports whether to use local hash-based embedder.
+// This is used when no API key is available for embedding providers.
+func useLocalEmbedder(provider string) bool {
+	switch provider {
+	case "deepseek", "anthropic":
+		return true
+	default:
+		return false
+	}
+}
+
 func resolveEmbedderProviderAndKey(cfg *config.Config) (provider, key string) {
+	// If no explicit embedder provider, auto-detect from LLM provider.
 	provider = cfg.Embedder.Provider
 	if provider == "" {
 		if embedderProviderSupportsEmbedding(cfg.LLM.Provider) {
 			provider = cfg.LLM.Provider
+		} else if useLocalEmbedder(cfg.LLM.Provider) {
+			// deepseek/anthropic → use local hash-based embedder (no API key needed)
+			provider = "local"
 		} else {
-			// deepseek/anthropic tidak punya embedding API → default ke openai
+			// fallback ke openai for other providers
 			provider = "openai"
 		}
 	}
 
+	// Use explicit embedder key if set AND it belongs to the resolved provider
+	// (i.e. not a stale key from a different provider copied into embedder.api_key).
+	// Heuristic: DeepSeek keys start with "sk-" but are not valid for OpenAI.
+	// If embedder provider != LLM provider, only trust embedder.api_key if it
+	// was explicitly set different from the LLM key.
 	key = cfg.Embedder.APIKey
+	if key == cfg.LLM.APIKey && provider != cfg.LLM.Provider && provider != "local" {
+		// embedder.api_key is just a copy of the LLM key — useless for a
+		// different provider (e.g. DeepSeek key sent to OpenAI). Clear it.
+		key = ""
+	}
 	if key == "" && provider == cfg.LLM.Provider {
-		// Hanya pakai LLM API key jika provider embedding sama dengan LLM
 		key = cfg.LLM.APIKey
+	}
+	if key == "" && provider != "local" {
+		log.Printf("warn: embedder provider %q requires an API key — set embedder.api_key in ~/.miraclaw/config.yaml or run --setup", provider)
 	}
 	return provider, key
 }
@@ -260,6 +287,8 @@ func buildEmbedder(cfg *config.Config) (orchestra.Embedder, error) {
 	switch provider {
 	case "gemini":
 		return embedders.NewGeminiEmbedder(key)
+	case "local":
+		return embedders.NewLocalEmbedder(), nil
 	default:
 		return embedders.NewOpenAIEmbedder(key), nil
 	}

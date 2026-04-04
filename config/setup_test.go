@@ -36,7 +36,7 @@ func TestDefaultConfigValues(t *testing.T) {
 	if cfg.Agent.MaxOutputTokens != 1024 {
 		t.Errorf("expected 1024 max output tokens, got %d", cfg.Agent.MaxOutputTokens)
 	}
-	if cfg.Embedder.Provider != "openai" {
-		t.Errorf("expected openai embedder, got %s", cfg.Embedder.Provider)
+	if cfg.Embedder.Provider != "" {
+		t.Errorf("expected empty embedder provider (auto-detect), got %s", cfg.Embedder.Provider)
 	}
 }

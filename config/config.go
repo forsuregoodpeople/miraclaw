@@ -104,7 +104,7 @@ func DefaultConfig() *Config {
 			Model:    "gpt-4o-mini",
 		},
 		Embedder: EmbedderConfig{
-			Provider: "openai",
+			Provider: "", // resolved at runtime from LLM provider
 		},
 	}
 }
