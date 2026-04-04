@@ -130,6 +130,58 @@ miraclaw --detach    # background (detached process)
 
 ---
 
+## Update
+
+Update MiraClaw to the latest version using the built-in update script:
+
+```bash
+# Normal update (pull, build, restart)
+./update.sh
+
+# Update + clear memory (recommended when embedder/vector dims change)
+./update.sh --clear-memory
+
+# Just restart without updating
+./update.sh --restart-only
+```
+
+The update script will:
+1. Pull latest changes from git
+2. Rebuild the binary
+3. Restart the systemd service (or background process)
+4. Optionally clear Qdrant memory if `--clear-memory` is passed
+
+### One-liner update (without cloning)
+
+If you installed via `install.sh`, run this from your MiraClaw directory:
+
+```bash
+cd /usr/local/src/miraclaw && sudo ./update.sh
+```
+
+Or use curl for a true one-liner (downloads and runs update):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash -s --
+```
+
+With memory clear:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash -s -- --clear-memory
+```
+
+### When to use `--clear-memory`
+
+Clear memory when:
+- Embedding dimensions change (e.g., 384 → 768)
+- Major schema changes in memory storage
+- Corrupted or incompatible vector data
+
+⚠️ **Warning:** `--clear-memory` deletes all stored conversations and memories. Use with caution!
+
+---
+
 ## Configuration
 
 ### Interactive Setup Wizard
