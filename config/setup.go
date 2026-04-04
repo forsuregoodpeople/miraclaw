@@ -143,8 +143,9 @@ func RunSetup(cfg *Config) error {
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Embedder Provider").
-				Description("Used for semantic memory. Same as LLM provider is fine.").
+				Description("Used for semantic memory. \"Same as LLM\" reuses your LLM provider and key.").
 				Options(
+					huh.NewOption("Same as LLM provider (recommended)", ""),
 					huh.NewOption("OpenAI (text-embedding-3-small)", "openai"),
 					huh.NewOption("Google Gemini (gemini-embedding-001)", "gemini"),
 				).
@@ -156,7 +157,7 @@ func RunSetup(cfg *Config) error {
 	}
 	cfg.Embedder.Provider = embedProvider
 
-	if embedProvider != llmProvider {
+	if embedProvider != "" && embedProvider != llmProvider {
 		embedKey := cfg.Embedder.APIKey
 		err = huh.NewForm(
 			huh.NewGroup(
