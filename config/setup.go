@@ -3,17 +3,57 @@ package config
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/charmbracelet/huh"
-	"gopkg.in/yaml.v3"
 )
 
-func RunSetup(cfg *Config) error {
-	fmt.Println("┌─────────────────────────────────┐")
-	fmt.Println("│       MiraClaw  Setup           │")
-	fmt.Println("└─────────────────────────────────┘")
+// ANSI color helpers for purple-blue gradient
+func colorRGB(r, g, b int) string {
+	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
+}
+
+const resetColor = "\033[0m"
+
+func printBanner() {
+	colors := []struct{ r, g, b int }{
+		{147, 51, 234}, // Purple
+		{130, 60, 238},
+		{110, 70, 240},
+		{90, 82, 242},
+		{72, 96, 244},
+		{59, 113, 246},
+		{59, 130, 246}, // Blue
+	}
+
+	lines := []string{
+		"██   ██  ███████  ██████     ███     ██████  ██         ███    ██   ██",
+		"███ ███    ███    ██   ██   ██ ██   ██       ██        ██ ██   ██   ██",
+		"████████   ███    ██   ██  ██   ██  ██       ██       ██   ██  ██ █ ██",
+		"██ █ ██    ███    ██████   ███████  ██       ██       ███████  ████████",
+		"██   ██    ███    ██  ██   ██   ██  ██       ██       ██   ██  ██ █ ██",
+		"██   ██    ███    ██   ██  ██   ██  ██       ██       ██   ██  ██   ██",
+		"██   ██  ███████  ██   ██  ██   ██   ██████  ███████  ██   ██  ██   ██",
+	}
+
+	for lineIdx, line := range lines {
+		colorIdx := (lineIdx * (len(colors) - 1)) / (len(lines) - 1)
+		c := colors[colorIdx]
+		color := colorRGB(c.r, c.g, c.b)
+		for _, char := range line {
+			if char == ' ' {
+				fmt.Print(" ")
+			} else {
+				fmt.Printf("%s%c%s", color, char, resetColor)
+			}
+		}
+		fmt.Println()
+	}
 	fmt.Println()
+}
+
+func RunSetup(cfg *Config) error {
+
+	printBanner()
 
 	// ── Step 1: Telegram ──────────────────────────────────────────────────────
 	var token, pairingID string
@@ -165,7 +205,12 @@ func RunSetup(cfg *Config) error {
 		cfg.Security.EncryptionKey = encKey
 	}
 
-	return save(cfg)
+	if err := Save(cfg); err != nil {
+		return err
+	}
+	home, _ := os.UserHomeDir()
+	fmt.Printf("\n✓ Config saved to %s/.miraclaw/config.yaml\n\n", home)
+	return nil
 }
 
 // ProviderDefaultModel returns the default model name for the given provider.
@@ -183,29 +228,4 @@ func ProviderDefaultModel(provider string) string {
 	default:
 		return ""
 	}
-}
-
-func save(cfg *Config) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-
-	dir := filepath.Join(home, ".miraclaw")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
-	}
-
-	data, err := yaml.Marshal(cfg)
-	if err != nil {
-		return err
-	}
-
-	path := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(path, data, 0600); err != nil {
-		return err
-	}
-
-	fmt.Printf("\n✓ Config saved to %s\n\n", path)
-	return nil
 }
