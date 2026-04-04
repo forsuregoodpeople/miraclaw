@@ -10,7 +10,7 @@ MIRACLAW_SERVICE="/etc/systemd/system/miraclaw.service"
 MIRACLAW_BIN="$INSTALL_DIR/miraclaw"
 MIRACLAW_REPO="${MIRACLAW_REPO:-https://github.com/forsuregoodpeople/miraclaw.git}"
 MIRACLAW_SRC="/usr/local/src/miraclaw"
-GO_MIN="1.26"
+GO_MIN="1.24"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
