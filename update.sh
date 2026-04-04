@@ -8,7 +8,7 @@
 #
 # Can be run:
 #   - From local repo: ./update.sh
-#   - Via curl: curl -fsSL .../update.sh | sudo bash
+#   - Via curl: curl -fsSL .../update.sh | sudo bash -s -- [options]
 #
 
 set -e
@@ -19,42 +19,11 @@ QDRANT_DATA_DIR="/var/lib/qdrant/storage/collections"
 INSTALL_DIR="/usr/local/src/miraclaw"
 REPO_URL="https://github.com/forsuregoodpeople/miraclaw.git"
 
-# Detect if running via curl (script is piped to bash)
-# In this case, BASH_SOURCE might not point to the actual file
+# Detect if running via curl/pipe
 IS_PIPED=false
-if [[ ! -t 0 ]] || [[ "$0" == "bash" ]] || [[ "$0" == "/bin/bash" ]]; then
+if [[ ! -t 0 ]] || [[ "$0" == "bash" ]] || [[ "$0" == "/bin/bash" ]] || [[ "$0" == "-bash" ]]; then
     IS_PIPED=true
 fi
-
-# Try to find the MiraClaw installation
-find_miraclaw_dir() {
-    # Check if we're in a git repo
-    if [[ -d ".git" ]]; then
-        pwd
-        return 0
-    fi
-    
-    # Check standard install location
-    if [[ -d "$INSTALL_DIR/.git" ]]; then
-        echo "$INSTALL_DIR"
-        return 0
-    fi
-    
-    # Check if miraclaw binary exists and find its source
-    if command -v miraclaw &> /dev/null; then
-        local bin_path
-        bin_path=$(which miraclaw)
-        # Try to find source from binary location
-        local possible_src
-        possible_src=$(dirname "$bin_path")/../src/miraclaw 2>/dev/null || true
-        if [[ -d "$possible_src/.git" ]]; then
-            echo "$possible_src"
-            return 0
-        fi
-    fi
-    
-    return 1
-}
 
 # Colors
 RED='\033[0;31m'
@@ -82,7 +51,9 @@ log_error() {
 show_help() {
     echo "Miraclaw Update Script"
     echo ""
-    echo "Usage: $0 [options]"
+    echo "Usage:"
+    echo "  ./update.sh [options]           # Run from local repo"
+    echo "  curl -fsSL .../update.sh | sudo bash -s -- [options]"
     echo ""
     echo "Options:"
     echo "  --clear-memory    Clear Qdrant memory (recommended when embedder changes)"
@@ -90,13 +61,9 @@ show_help() {
     echo "  --help            Show this help"
     echo ""
     echo "Examples:"
-    echo "  ./update.sh                    # Normal update (from local repo)"
-    echo "  ./update.sh --clear-memory     # Update + clear memory"
-    echo "  ./update.sh --restart-only     # Just restart"
-    echo ""
-    echo "Via curl (one-liner):"
+    echo "  ./update.sh"
+    echo "  ./update.sh --clear-memory"
     echo "  curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash"
-    echo "  curl -fsSL .../update.sh | sudo bash -s -- --clear-memory"
 }
 
 # Parse arguments
@@ -125,31 +92,38 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Find or clone MiraClaw repository
-SCRIPT_DIR=$(find_miraclaw_dir 2>/dev/null || true)
+# Determine working directory
+if [[ "$IS_PIPED" == true ]]; then
+    # Running via curl - use install directory
+    log_info "Running via curl/pipe - using $INSTALL_DIR"
+    SCRIPT_DIR="$INSTALL_DIR"
+else
+    # Running locally - find script directory
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
-if [[ -z "$SCRIPT_DIR" ]]; then
-    if [[ "$IS_PIPED" == true ]]; then
-        log_info "MiraClaw not found locally. Installing to $INSTALL_DIR..."
-        
-        # Create install directory
-        sudo mkdir -p "$(dirname "$INSTALL_DIR")"
-        
-        # Clone repository
-        if [[ -d "$INSTALL_DIR" ]]; then
-            sudo rm -rf "$INSTALL_DIR"
-        fi
-        
-        sudo git clone "$REPO_URL" "$INSTALL_DIR"
-        SCRIPT_DIR="$INSTALL_DIR"
-        log_success "Repository cloned to $INSTALL_DIR"
-    else
-        log_error "MiraClaw repository not found!"
-        log_info "Please run this script from within the MiraClaw repository,"
-        log_info "or use the curl one-liner to install fresh:"
-        log_info "  curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash"
-        exit 1
+# If using install dir and it doesn't exist, clone it
+if [[ "$SCRIPT_DIR" == "$INSTALL_DIR" ]] && [[ ! -d "$INSTALL_DIR/.git" ]]; then
+    log_info "MiraClaw not found at $INSTALL_DIR"
+    log_info "Cloning repository..."
+    
+    sudo mkdir -p "$(dirname "$INSTALL_DIR")"
+    
+    if [[ -d "$INSTALL_DIR" ]]; then
+        sudo rm -rf "$INSTALL_DIR"
     fi
+    
+    sudo git clone "$REPO_URL" "$INSTALL_DIR"
+    log_success "Repository cloned to $INSTALL_DIR"
+fi
+
+# Verify we have a git repo
+if [[ ! -d "$SCRIPT_DIR/.git" ]]; then
+    log_error "MiraClaw repository not found at $SCRIPT_DIR"
+    log_info "Please run this script from within the MiraClaw repository,"
+    log_info "or use the curl one-liner which will auto-install:"
+    log_info "  curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash"
+    exit 1
 fi
 
 log_info "Working directory: $SCRIPT_DIR"
@@ -159,30 +133,26 @@ cd "$SCRIPT_DIR"
 if [[ "$RESTART_ONLY" == false ]]; then
     log_info "Checking prerequisites..."
     
-    # Check git
     if ! command -v git &> /dev/null; then
         log_error "git is not installed"
         exit 1
     fi
     
-    # Check go
     if ! command -v go &> /dev/null; then
         log_error "Go is not installed"
         exit 1
     fi
 fi
 
-# Stop service if running
+# Stop service
 stop_service() {
     log_info "Stopping $SERVICE_NAME service..."
     
-    # Try systemd first
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         sudo systemctl stop "$SERVICE_NAME" && log_success "Service stopped (systemd)"
         return
     fi
     
-    # Try to find and kill process
     if pgrep -x "$BINARY_NAME" > /dev/null; then
         sudo pkill -x "$BINARY_NAME" && log_success "Process stopped"
         sleep 2
@@ -193,13 +163,11 @@ stop_service() {
 start_service() {
     log_info "Starting $SERVICE_NAME service..."
     
-    # Try systemd
-    if systemctl list-unit-files | grep -q "^$SERVICE_NAME"; then
+    if systemctl list-unit-files 2>/dev/null | grep -q "^$SERVICE_NAME"; then
         sudo systemctl start "$SERVICE_NAME" && log_success "Service started (systemd)"
         return
     fi
     
-    # Start in background
     sudo nohup "$SCRIPT_DIR/$BINARY_NAME" > /dev/null 2>&1 &
     log_success "Service started in background (PID: $!)"
 }
@@ -208,7 +176,6 @@ start_service() {
 clear_memory() {
     log_warn "Clearing Qdrant memory..."
     
-    # Check if qdrant is running
     if systemctl is-active --quiet qdrant 2>/dev/null; then
         sudo systemctl stop qdrant
         QDRANT_WAS_RUNNING=true
@@ -216,7 +183,6 @@ clear_memory() {
         QDRANT_WAS_RUNNING=false
     fi
     
-    # Clear collections
     if [[ -d "$QDRANT_DATA_DIR" ]]; then
         sudo rm -rf "${QDRANT_DATA_DIR:?}"/*
         log_success "Qdrant collections cleared"
@@ -224,7 +190,6 @@ clear_memory() {
         log_warn "Qdrant data directory not found: $QDRANT_DATA_DIR"
     fi
     
-    # Restart qdrant if it was running
     if [[ "$QDRANT_WAS_RUNNING" == true ]]; then
         sudo systemctl start qdrant
         log_success "Qdrant restarted"
@@ -232,7 +197,7 @@ clear_memory() {
     fi
 }
 
-# Main update流程
+# Main
 main() {
     if [[ "$RESTART_ONLY" == true ]]; then
         stop_service
@@ -250,7 +215,7 @@ main() {
         exit 1
     fi
     
-    # Clear memory if requested (before build, while service is still running)
+    # Clear memory if requested
     if [[ "$CLEAR_MEMORY" == true ]]; then
         clear_memory
     fi
@@ -267,10 +232,9 @@ main() {
         exit 1
     fi
     
-    # Make executable
     sudo chmod +x "$BINARY_NAME"
     
-    # Copy to /usr/local/bin if exists
+    # Copy to /usr/local/bin
     if [[ -d "/usr/local/bin" ]]; then
         sudo cp "$BINARY_NAME" /usr/local/bin/ 2>/dev/null || true
         log_success "Binary copied to /usr/local/bin"
@@ -285,7 +249,7 @@ main() {
     
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         log_success "Service is running!"
-        sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
+        sudo systemctl status "$SERVICE_NAME" --no-pager -l 2>/dev/null || true
     elif pgrep -x "$BINARY_NAME" > /dev/null; then
         log_success "Process is running (PID: $(pgrep -x "$BINARY_NAME"))"
     else
@@ -301,5 +265,4 @@ main() {
     fi
 }
 
-# Run
 main "$@"
