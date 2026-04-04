@@ -207,6 +207,35 @@ func TestAgentReplySkillWithPreamble(t *testing.T) {
 	}
 }
 
+// TestAgentReplySkillWithExtraText verifies that only the first line of a skill
+// call is used as input, ignoring any trailing text after the newline.
+func TestAgentReplySkillWithExtraText(t *testing.T) {
+	mem := &fakeMemory{}
+	var capturedInput string
+	llm := &multiMockLLM{
+		responses: []string{
+			"SKILL:exec:date '+%H:%M'\n\nWah iya ya, error tadi.\n\nMungkin lagi ada gangguan kecil.", // skill with extra text
+			"Sekarang jam 14:30.", // second call: formatted
+		},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	sys.Register("exec", "run command", func(_ context.Context, input string) (string, error) {
+		capturedInput = input
+		return "14:30", nil
+	})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg := orchestra.NewMessage("msg-extratext", "jam berapa sekarang", "chan-et")
+	_, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	// The input should only contain the command, not the trailing text
+	if capturedInput != "date '+%H:%M'" {
+		t.Errorf("expected input to be 'date '+%%H:%%M'', got %q", capturedInput)
+	}
+}
+
 func TestAgentReplySecurityReject(t *testing.T) {
 	mem := &fakeMemory{}
 	llm := &mockLLM{response: "should not reach"}

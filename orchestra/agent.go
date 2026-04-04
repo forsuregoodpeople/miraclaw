@@ -228,7 +228,7 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 	sysContent.WriteString("- NEVER end with a question ('Ada yang mau dibahas?', 'Ada lagi?', etc.) unless the user explicitly asked something open-ended.\n")
 	sysContent.WriteString("- Be personal: read the emotional tone, respond with empathy.\n")
 	sysContent.WriteString("- Use humor or emojis when it fits, but keep it natural — don't force it.\n")
-	sysContent.WriteString("BUBBLE FORMAT (mandatory): Each response MUST be split into 4-6 separate short messages minimum. Separate every idea, sentence, or thought with a blank line (\\n\\n). Never write more than 1-2 sentences per bubble. Think of each bubble as a separate chat message sent one by one. Expand your response naturally — add reactions, follow-up thoughts, emojis — to reach at least 4 bubbles.\n")
+	sysContent.WriteString("BUBBLE FORMAT (mandatory): Each response MUST be split dynamic. Separate every idea, sentence, or thought with a blank line (\\n\\n). Never write more than 1-2 sentences per bubble. Think of each bubble as a separate chat message sent one by one. Expand your response naturally — add reactions, follow-up thoughts, emojis — to reach at least 4 bubbles.\n")
 	sysContent.WriteString("Example — CORRECT (4 bubbles):\nHalo! 😊\n\nWah, siang-siang udah muncul nih.\n\nGimana harimu sejauh ini?\n\nSemoga lancar ya!\n\nExample — WRONG (1 bubble):\nHalo! 😊 Wah siang-siang udah muncul. Gimana harimu? Semoga lancar!\n")
 	sysContent.WriteString("- NEVER echo the user's message. NEVER reply with just 'ok', 'hmm', or a single word.\n")
 
@@ -436,6 +436,7 @@ func extractIdentityFields(identity []*Message) (name, lang string) {
 
 // parseSkillCall parses "SKILL:name:input" from anywhere in LLM response.
 // This handles cases where the LLM adds preamble text before the skill call.
+// Input is taken only until the first newline (single-line skill call only).
 func parseSkillCall(resp string) (name, input string, ok bool) {
 	idx := strings.Index(resp, "SKILL:")
 	if idx < 0 {
@@ -451,5 +452,10 @@ func parseSkillCall(resp string) (name, input string, ok bool) {
 	if strings.ContainsAny(n, " \n\r\t") {
 		return "", "", false
 	}
-	return n, rest[sep+1:], true
+	// Take input only until first newline (skill calls are single-line)
+	input = rest[sep+1:]
+	if nl := strings.IndexAny(input, "\n\r"); nl >= 0 {
+		input = input[:nl]
+	}
+	return n, strings.TrimSpace(input), true
 }
