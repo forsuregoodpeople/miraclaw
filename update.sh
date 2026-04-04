@@ -6,13 +6,55 @@
 #   --restart-only    Only restart service without git pull/build
 #   --help            Show this help
 #
+# Can be run:
+#   - From local repo: ./update.sh
+#   - Via curl: curl -fsSL .../update.sh | sudo bash
+#
 
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARY_NAME="miraclaw"
 SERVICE_NAME="miraclaw"
 QDRANT_DATA_DIR="/var/lib/qdrant/storage/collections"
+INSTALL_DIR="/usr/local/src/miraclaw"
+REPO_URL="https://github.com/forsuregoodpeople/miraclaw.git"
+
+# Detect if running via curl (script is piped to bash)
+# In this case, BASH_SOURCE might not point to the actual file
+IS_PIPED=false
+if [[ ! -t 0 ]] || [[ "$0" == "bash" ]] || [[ "$0" == "/bin/bash" ]]; then
+    IS_PIPED=true
+fi
+
+# Try to find the MiraClaw installation
+find_miraclaw_dir() {
+    # Check if we're in a git repo
+    if [[ -d ".git" ]]; then
+        pwd
+        return 0
+    fi
+    
+    # Check standard install location
+    if [[ -d "$INSTALL_DIR/.git" ]]; then
+        echo "$INSTALL_DIR"
+        return 0
+    fi
+    
+    # Check if miraclaw binary exists and find its source
+    if command -v miraclaw &> /dev/null; then
+        local bin_path
+        bin_path=$(which miraclaw)
+        # Try to find source from binary location
+        local possible_src
+        possible_src=$(dirname "$bin_path")/../src/miraclaw 2>/dev/null || true
+        if [[ -d "$possible_src/.git" ]]; then
+            echo "$possible_src"
+            return 0
+        fi
+    fi
+    
+    return 1
+}
 
 # Colors
 RED='\033[0;31m'
@@ -48,9 +90,13 @@ show_help() {
     echo "  --help            Show this help"
     echo ""
     echo "Examples:"
-    echo "  $0                    # Normal update (pull, build, restart)"
-    echo "  $0 --clear-memory     # Update + clear memory (for embedder changes)"
-    echo "  $0 --restart-only     # Just restart the service"
+    echo "  ./update.sh                    # Normal update (from local repo)"
+    echo "  ./update.sh --clear-memory     # Update + clear memory"
+    echo "  ./update.sh --restart-only     # Just restart"
+    echo ""
+    echo "Via curl (one-liner):"
+    echo "  curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash"
+    echo "  curl -fsSL .../update.sh | sudo bash -s -- --clear-memory"
 }
 
 # Parse arguments
@@ -79,9 +125,37 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Find or clone MiraClaw repository
+SCRIPT_DIR=$(find_miraclaw_dir 2>/dev/null || true)
+
+if [[ -z "$SCRIPT_DIR" ]]; then
+    if [[ "$IS_PIPED" == true ]]; then
+        log_info "MiraClaw not found locally. Installing to $INSTALL_DIR..."
+        
+        # Create install directory
+        sudo mkdir -p "$(dirname "$INSTALL_DIR")"
+        
+        # Clone repository
+        if [[ -d "$INSTALL_DIR" ]]; then
+            sudo rm -rf "$INSTALL_DIR"
+        fi
+        
+        sudo git clone "$REPO_URL" "$INSTALL_DIR"
+        SCRIPT_DIR="$INSTALL_DIR"
+        log_success "Repository cloned to $INSTALL_DIR"
+    else
+        log_error "MiraClaw repository not found!"
+        log_info "Please run this script from within the MiraClaw repository,"
+        log_info "or use the curl one-liner to install fresh:"
+        log_info "  curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/update.sh | sudo bash"
+        exit 1
+    fi
+fi
+
+log_info "Working directory: $SCRIPT_DIR"
 cd "$SCRIPT_DIR"
 
-# Check if running as root for systemctl operations
+# Check prerequisites
 if [[ "$RESTART_ONLY" == false ]]; then
     log_info "Checking prerequisites..."
     
@@ -110,7 +184,7 @@ stop_service() {
     
     # Try to find and kill process
     if pgrep -x "$BINARY_NAME" > /dev/null; then
-        pkill -x "$BINARY_NAME" && log_success "Process stopped"
+        sudo pkill -x "$BINARY_NAME" && log_success "Process stopped"
         sleep 2
     fi
 }
@@ -126,7 +200,7 @@ start_service() {
     fi
     
     # Start in background
-    nohup "./$BINARY_NAME" > /dev/null 2>&1 &
+    sudo nohup "$SCRIPT_DIR/$BINARY_NAME" > /dev/null 2>&1 &
     log_success "Service started in background (PID: $!)"
 }
 
@@ -169,7 +243,7 @@ main() {
     
     # Git pull
     log_info "Pulling latest changes from git..."
-    if git pull origin main; then
+    if sudo git pull origin main; then
         log_success "Git pull successful"
     else
         log_error "Git pull failed"
@@ -186,7 +260,7 @@ main() {
     
     # Build
     log_info "Building $BINARY_NAME..."
-    if go build -o "$BINARY_NAME" .; then
+    if sudo go build -o "$BINARY_NAME" .; then
         log_success "Build successful"
     else
         log_error "Build failed"
@@ -194,7 +268,13 @@ main() {
     fi
     
     # Make executable
-    chmod +x "$BINARY_NAME"
+    sudo chmod +x "$BINARY_NAME"
+    
+    # Copy to /usr/local/bin if exists
+    if [[ -d "/usr/local/bin" ]]; then
+        sudo cp "$BINARY_NAME" /usr/local/bin/ 2>/dev/null || true
+        log_success "Binary copied to /usr/local/bin"
+    fi
     
     # Start service
     start_service
@@ -205,7 +285,7 @@ main() {
     
     if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
         log_success "Service is running!"
-        systemctl status "$SERVICE_NAME" --no-pager -l
+        sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
     elif pgrep -x "$BINARY_NAME" > /dev/null; then
         log_success "Process is running (PID: $(pgrep -x "$BINARY_NAME"))"
     else
