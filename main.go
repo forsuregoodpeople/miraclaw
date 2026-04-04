@@ -102,6 +102,24 @@ func main() {
 	}
 	ch.SetMemory(mem)
 
+	// Enable pairing gate if a pairing code is configured
+	if cfg.Telegram.PairingID != "" {
+		pairing := channels.NewPairingHandler(
+			cfg.Telegram.PairingID,
+			cfg.Telegram.PairedChatID,
+			func(chatID int64) error {
+				cfg.Telegram.PairedChatID = chatID
+				return config.Save(cfg)
+			},
+		)
+		ch.SetPairing(pairing)
+		if cfg.Telegram.PairedChatID == 0 {
+			log.Printf("Pairing required — send code to bot to activate")
+		} else {
+			log.Printf("Paired with chat ID: %d", cfg.Telegram.PairedChatID)
+		}
+	}
+
 	log.Printf("Bot started [llm:%s model:%s]", cfg.LLM.Provider, cfg.LLM.Model)
 	ch.Start(ctx)
 }
