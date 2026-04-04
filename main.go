@@ -225,15 +225,38 @@ func main() {
 	ch.Start(ctx)
 }
 
-func buildEmbedder(cfg *config.Config) (orchestra.Embedder, error) {
-	key := cfg.Embedder.APIKey
-	if key == "" {
+// embedderProviderSupportsEmbedding reports whether the given LLM provider
+// has its own embedding API. DeepSeek and Anthropic do not.
+func embedderProviderSupportsEmbedding(provider string) bool {
+	switch provider {
+	case "openai", "gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveEmbedderProviderAndKey(cfg *config.Config) (provider, key string) {
+	provider = cfg.Embedder.Provider
+	if provider == "" {
+		if embedderProviderSupportsEmbedding(cfg.LLM.Provider) {
+			provider = cfg.LLM.Provider
+		} else {
+			// deepseek/anthropic tidak punya embedding API → default ke openai
+			provider = "openai"
+		}
+	}
+
+	key = cfg.Embedder.APIKey
+	if key == "" && provider == cfg.LLM.Provider {
+		// Hanya pakai LLM API key jika provider embedding sama dengan LLM
 		key = cfg.LLM.APIKey
 	}
-	provider := cfg.Embedder.Provider
-	if provider == "" {
-		provider = cfg.LLM.Provider
-	}
+	return provider, key
+}
+
+func buildEmbedder(cfg *config.Config) (orchestra.Embedder, error) {
+	provider, key := resolveEmbedderProviderAndKey(cfg)
 	switch provider {
 	case "gemini":
 		return embedders.NewGeminiEmbedder(key)

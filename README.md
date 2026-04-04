@@ -8,18 +8,23 @@
 ██   ██  ███████  ██   ██  ██   ██   ██████  ███████  ██   ██  ██   ██
 ```
 
-**Self-hosted AI agent framework with long-term semantic memory, multi-provider LLM support, and a flexible skill system.**
+**The most token-efficient self-hosted AI agent — OpenClaw-compatible, built for people who care about every token.**
 
 ---
 
 ## What is MiraClaw?
 
-MiraClaw is an alternative to OpenClaw — a self-hosted AI agent you run on your own server. It is **not** a Telegram bot; Telegram is simply one supported input channel. At its core, MiraClaw is an agent loop: receive input → retrieve relevant memories → call an LLM → execute skills → store the reply. Everything persists across restarts via a 4-tier Qdrant vector database, so your agent remembers conversations, facts, identity, and scheduled tasks indefinitely.
+MiraClaw is an alternative to OpenClaw, built with one core ambition: **do everything OpenClaw does, but spend as few tokens as possible doing it.** It is a self-hosted AI agent framework you run on your own server — not a Telegram bot (Telegram is simply one supported input channel).
+
+Every architectural decision is driven by token efficiency: short, targeted memory retrieval instead of dumping full history; skill descriptions capped at 40 characters in the prompt; context window budgeting that prunes low-priority segments before high-priority ones; aspiration-based system prompts that are shorter than rule-based equivalents. The goal is a capable, long-memory agent that costs a fraction of what a naive implementation would.
+
+At its core, MiraClaw is an agent loop: receive input → retrieve only the relevant memories → call an LLM → execute skills → store the reply. Everything persists across restarts via a 4-tier Qdrant vector database, so your agent remembers conversations, facts, identity, and scheduled tasks indefinitely — without re-sending the entire history every time.
 
 ---
 
 ## Features
 
+- **Token-efficient by design** — targeted memory retrieval, capped skill descriptions, context window budgeting; never sends more than needed
 - **4-tier semantic memory** — Session, ShortTerm, LongTerm, and Static collections backed by Qdrant
 - **Multi-provider LLM** — OpenAI, Anthropic (Claude), DeepSeek, Google Gemini
 - **Hot-swap model** — switch LLM model at runtime with `/model`, no restart required
@@ -30,7 +35,7 @@ MiraClaw is an alternative to OpenClaw — a self-hosted AI agent you run on you
 - **AES-256-GCM encryption** — optional passphrase-based encryption of all stored memories
 - **Security hardening** — injection scanner, SSRF guard, command guard, rate limiter
 - **Telegram pairing gate** — single-user mode via one-time code; blocks all other callers
-- **One-command install** — `sudo bash install.sh` installs Qdrant + MiraClaw as systemd services
+- **One-liner install** — single `curl | bash` installs Qdrant + MiraClaw as systemd services, no clone needed
 - **Background mode** — `--detach` flag re-launches as a detached background process
 - **Custom knowledge** — load a Markdown file (`AGENT.md`) as persistent static knowledge
 
@@ -84,19 +89,18 @@ Architecture: `x86_64` or `aarch64` (Linux only).
 ## Installation
 
 ```bash
-git clone https://github.com/your-org/miraclaw
-cd miraclaw
-sudo bash install.sh
+curl -fsSL https://raw.githubusercontent.com/nicholasgasior/MiraClaw/main/install.sh | sudo bash
 ```
 
-The installer will:
-1. Check Go version
-2. Download and install **Qdrant** (vector database) as a systemd service
-3. Build the **MiraClaw** binary to `/usr/local/bin/miraclaw`
-4. Install **MiraClaw** as a systemd service (auto-start on boot, restart on failure)
-5. Add `miraclaw` shell alias to `~/.bashrc`
-6. Launch the interactive **setup wizard** to configure your tokens and LLM
-7. Start the MiraClaw service
+No clone needed. The installer will:
+1. Check Go ≥ 1.26 and required tools
+2. Clone the MiraClaw source to `/usr/local/src/miraclaw`
+3. Download and install **Qdrant** as a systemd service
+4. Build the **MiraClaw** binary to `/usr/local/bin/miraclaw`
+5. Install **MiraClaw** as a systemd service (auto-start on boot, restart on failure)
+6. Add `miraclaw` alias to `~/.bashrc`
+7. Launch the interactive **setup wizard** to configure your tokens and LLM
+8. Start both services
 
 After install:
 
@@ -105,6 +109,14 @@ journalctl -u miraclaw -f        # live logs
 systemctl stop miraclaw           # stop
 systemctl start miraclaw          # start
 miraclaw --setup                  # reconfigure
+```
+
+### From a local clone
+
+```bash
+git clone https://github.com/nicholasgasior/MiraClaw
+cd MiraClaw
+sudo bash install.sh
 ```
 
 ### Manual run (without systemd)
