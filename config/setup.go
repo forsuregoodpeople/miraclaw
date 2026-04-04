@@ -143,7 +143,7 @@ func RunSetup(cfg *Config) error {
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Embedder Provider").
-				Description("Used for semantic memory. \"Same as LLM\" reuses your LLM provider and key.").
+				Description("DeepSeek/Anthropic users: choose 'Local' (no API key). OpenAI/Gemini: choose 'Same as LLM' to reuse key.").
 				Options(
 					huh.NewOption("Same as LLM provider (recommended)", ""),
 					huh.NewOption("OpenAI (text-embedding-3-small)", "openai"),
