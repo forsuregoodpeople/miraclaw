@@ -180,8 +180,8 @@ func RunSetup(cfg *Config) error {
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewText().
-				Title("Agent System Prompt (optional)").
-				Description("Defines the agent's persona. Leave blank to skip.").
+				Title("Agent Persona (optional)").
+				Description("Defines the agent's identity. Saved to Qdrant static knowledge on next startup. Leave blank to skip.").
 				CharLimit(500).
 				Value(&systemPrompt),
 		),

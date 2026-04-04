@@ -25,7 +25,9 @@ type Qdrant struct {
 }
 
 type Agent struct {
-	SystemPrompt       string `yaml:"system_prompt"`
+	BotName            string `yaml:"bot_name"`              // name injected into every system prompt as identity anchor
+	SystemPrompt       string `yaml:"system_prompt"`         // additional persona/context appended to system prompt
+	AgentMD            string `yaml:"agent_md"`              // path to AGENT.md loaded into static knowledge on startup
 	MaxContextMessages int    `yaml:"max_context_messages"`
 	MaxHistoryTurns    int    `yaml:"max_history_turns"`
 	MaxMessageLen      int    `yaml:"max_message_len"`
@@ -33,6 +35,7 @@ type Agent struct {
 	MaxSummaryLen      int    `yaml:"max_summary_len"`
 	MaxInputLen        int    `yaml:"max_input_len"`
 	MaxSkillDescLen    int    `yaml:"max_skill_desc_len"`
+	ContextWindow      int    `yaml:"context_window"` // max estimated tokens sent to LLM (0 = unlimited)
 }
 
 type Security struct {
@@ -51,6 +54,18 @@ type EmbedderConfig struct {
 	APIKey   string `yaml:"api_key"`
 }
 
+// ScheduleRule defines a single scheduled proactive message.
+type ScheduleRule struct {
+	Cron   string `yaml:"cron"`    // standard 5-field cron expression, e.g. "0 9 * * 1-5"
+	Prompt string `yaml:"prompt"`  // text sent to the agent as synthetic user input
+	ChatID int64  `yaml:"chat_id"` // Telegram chat ID to deliver the reply to
+}
+
+// Schedule holds all cron scheduling configuration.
+type Schedule struct {
+	Rules []ScheduleRule `yaml:"rules"`
+}
+
 type Config struct {
 	Telegram Telegram       `yaml:"telegram"`
 	Qdrant   Qdrant         `yaml:"qdrant"`
@@ -58,6 +73,7 @@ type Config struct {
 	LLM      LLMConfig      `yaml:"llm"`
 	Embedder EmbedderConfig `yaml:"embedder"`
 	Security Security       `yaml:"security"`
+	Schedule Schedule       `yaml:"schedule"`
 }
 
 func DefaultConfig() *Config {
@@ -72,6 +88,8 @@ func DefaultConfig() *Config {
 			CollectionStatic:    "miraclaw_static",
 		},
 		Agent: Agent{
+			BotName:            "Mira",
+			AgentMD:            "~/.miraclaw/AGENT.md",
 			MaxContextMessages: 2,
 			MaxHistoryTurns:    6,
 			MaxMessageLen:      120,
@@ -79,6 +97,7 @@ func DefaultConfig() *Config {
 			MaxSummaryLen:      200,
 			MaxInputLen:        400,
 			MaxSkillDescLen:    40,
+			ContextWindow:      4096,
 		},
 		LLM: LLMConfig{
 			Provider: "openai",

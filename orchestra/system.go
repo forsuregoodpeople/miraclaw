@@ -74,12 +74,12 @@ func (s *System) Exec(ctx context.Context, command string) (string, error) {
 			return "", fmt.Errorf("command rejected: %w", err)
 		}
 	}
-	parts := strings.Fields(command)
-	if len(parts) == 0 {
+	command = strings.TrimSpace(command)
+	if command == "" {
 		return "", fmt.Errorf("empty command")
 	}
 	var out bytes.Buffer
-	cmd := exec.CommandContext(ctx, parts[0], parts[1:]...)
+	cmd := exec.CommandContext(ctx, "sh", "-c", command)
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"log"
 	"os/exec"
 	"sort"
+	"strings"
 	"time"
 
 	qclient "github.com/qdrant/go-client/qdrant"
@@ -148,6 +149,20 @@ func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
 	return m.upsertPoint(ctx, m.collections.Session, msg, role)
 }
 
+// AddImportant adds a message to session AND immediately promotes it to long-term memory.
+func (m *Memory) AddImportant(ctx context.Context, msg *Message, role string) error {
+	// First add to session
+	if err := m.upsertPoint(ctx, m.collections.Session, msg, role); err != nil {
+		return fmt.Errorf("add to session: %w", err)
+	}
+	// Immediately promote to long-term
+	if err := m.upsertPoint(ctx, m.collections.LongTerm, msg, role); err != nil {
+		return fmt.Errorf("add to long-term: %w", err)
+	}
+	log.Printf("[Memory] Important message promoted to long-term: %s", msg.ID)
+	return nil
+}
+
 func (m *Memory) AddBotReply(ctx context.Context, channelID, text string) error {
 	id := fmt.Sprintf("bot-%s-%d", channelID, time.Now().UnixNano())
 	msg := NewMessage(id, text, channelID)
@@ -157,6 +172,26 @@ func (m *Memory) AddBotReply(ctx context.Context, channelID, text string) error 
 func (m *Memory) AddStatic(ctx context.Context, id, text, category string) error {
 	msg := NewMessage(id, text, category)
 	return m.upsertPoint(ctx, m.collections.Static, msg, "static")
+}
+
+// GetStaticByCategory fetches all static knowledge points with the given category,
+// ordered by timestamp. No vector search — guaranteed retrieval by exact match.
+func (m *Memory) GetStaticByCategory(ctx context.Context, category string) ([]*Message, error) {
+	var lim uint32 = 100
+	results, err := m.client.Scroll(ctx, &qclient.ScrollPoints{
+		CollectionName: m.collections.Static,
+		Filter: &qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewMatch("channel_id", category),
+			},
+		},
+		Limit:       &lim,
+		WithPayload: qclient.NewWithPayload(true),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get static by category: %w", err)
+	}
+	return m.parseTimestamped(results), nil
 }
 
 func (m *Memory) GetSession(ctx context.Context, channelID string, limit uint64) ([]*Message, error) {
@@ -304,6 +339,79 @@ func (m *Memory) PromoteToLongTerm(ctx context.Context, msgID string) error {
 	}); err != nil {
 		return fmt.Errorf("promote to long-term: %w", err)
 	}
+	return nil
+}
+
+// AutoPromoteImportant scans short_term and promotes messages with important keywords to long_term.
+func (m *Memory) AutoPromoteImportant(ctx context.Context) (int, error) {
+	var bigLimit uint32 = 1000
+	results, err := m.client.Scroll(ctx, &qclient.ScrollPoints{
+		CollectionName: m.collections.ShortTerm,
+		Limit:          &bigLimit,
+		WithPayload:    qclient.NewWithPayload(true),
+		WithVectors:    qclient.NewWithVectors(true),
+	})
+	if err != nil {
+		return 0, fmt.Errorf("scan short-term: %w", err)
+	}
+
+	importantKeywords := []string{
+		"nama", "name", "alamat", "address", "telepon", "phone",
+		"email", "ultah", "birthday", "suka", "like", "kerja", "work",
+		"tinggal", "live", "important", "penting", "remember", "ingat",
+	}
+
+	promoted := 0
+	for _, r := range results {
+		p := r.GetPayload()
+		text := strings.ToLower(p["text"].GetStringValue())
+		
+		isImportant := false
+		for _, kw := range importantKeywords {
+			if strings.Contains(text, kw) {
+				isImportant = true
+				break
+			}
+		}
+		
+		if isImportant {
+			vec := vectorOutputToFloat32(r.GetVectors())
+			if vec == nil {
+				continue
+			}
+			if _, err := m.client.Upsert(ctx, &qclient.UpsertPoints{
+				CollectionName: m.collections.LongTerm,
+				Points: []*qclient.PointStruct{
+					{
+						Id:      r.GetId(),
+						Vectors: qclient.NewVectors(vec...),
+						Payload: p,
+					},
+				},
+			}); err == nil {
+				promoted++
+				log.Printf("[Memory] Auto-promoted to long-term: %s", p["id"].GetStringValue())
+			}
+		}
+	}
+	
+	if promoted > 0 {
+		log.Printf("[Memory] Auto-promoted %d messages to long-term", promoted)
+	}
+	return promoted, nil
+}
+
+// ClearAll deletes and recreates all memory collections, wiping all stored data.
+func (m *Memory) ClearAll(ctx context.Context) error {
+	for _, col := range []string{m.collections.Session, m.collections.ShortTerm, m.collections.LongTerm, m.collections.Static} {
+		if err := m.client.DeleteCollection(ctx, col); err != nil {
+			return fmt.Errorf("delete collection %q: %w", col, err)
+		}
+		if err := m.ensureCollection(ctx, col); err != nil {
+			return fmt.Errorf("recreate collection %q: %w", col, err)
+		}
+	}
+	log.Println("[Memory] All collections cleared")
 	return nil
 }
 

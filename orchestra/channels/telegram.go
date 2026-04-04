@@ -3,9 +3,12 @@ package channels
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -89,6 +92,20 @@ type TelegramChannel struct {
 	commands          *CommandHandler
 }
 
+// deleteWebhook calls Telegram's deleteWebhook endpoint before starting polling.
+// This clears any active webhook and drops pending long-poll conflicts.
+func deleteWebhook(token string) {
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/deleteWebhook?drop_pending_updates=false", token)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		log.Printf("[TGBOT] deleteWebhook: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+}
+
 func NewTelegramChannel(pairingID, token string, agent *orchestra.Agent, limiter *security.RateLimiter) (*TelegramChannel, error) {
 	ch := &TelegramChannel{
 		TelegramPairingID: pairingID,
@@ -98,7 +115,13 @@ func NewTelegramChannel(pairingID, token string, agent *orchestra.Agent, limiter
 		activeSessions:    make(map[string]struct{}),
 	}
 
-	b, err := bot.New(token, bot.WithDefaultHandler(ch.handleUpdate))
+	// Clear any stale webhook or long-poll conflict before connecting.
+	deleteWebhook(token)
+
+	b, err := bot.New(token,
+		bot.WithDefaultHandler(ch.handleUpdate),
+		bot.WithCheckInitTimeout(15*time.Second),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +160,27 @@ func (c *TelegramChannel) Start(ctx context.Context) {
 		log.Printf("Sessions closed: %d", len(c.activeSessions))
 	}()
 	c.bot.Start(ctx)
+}
+
+func SplitBubbles(text string, maxLen int) []string {
+	var out []string
+	for _, part := range strings.Split(text, "\n\n") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		for len(part) > maxLen {
+			out = append(out, part[:maxLen])
+			part = part[maxLen:]
+		}
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		out = append(out, strings.TrimSpace(text))
+	}
+	return out
 }
 
 func (c *TelegramChannel) PairingID() string {
@@ -218,25 +262,49 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, b *bot.Bot, update *
 		return
 	}
 
-	const maxLen = 4096
-	for len(reply) > 0 {
-		chunk := reply
-		if len(chunk) > maxLen {
-			cut := maxLen
-			if i := strings.LastIndex(reply[:maxLen], "\n"); i > 0 {
-				cut = i + 1
+	bubbles := SplitBubbles(reply, 4096)
+	for i, bubble := range bubbles {
+		if i > 0 {
+			if _, err := b.SendChatAction(ctx, &bot.SendChatActionParams{
+				ChatID: chatID,
+				Action: models.ChatActionTyping,
+			}); err != nil {
+				log.Printf("send typing action failed: %v", err)
 			}
-			chunk = reply[:cut]
-			reply = reply[cut:]
-		} else {
-			reply = ""
+			time.Sleep(300 * time.Millisecond)
 		}
 		if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   chunk,
+			ChatID:    chatID,
+			Text:      bubble,
+			ParseMode: models.ParseModeMarkdownV1,
 		}); sendErr != nil {
-			log.Printf("send chunk failed (chatID %d): %v", chatID, sendErr)
+			log.Printf("send bubble failed (chatID %d): %v", chatID, sendErr)
 			break
 		}
 	}
+}
+
+// SendBubbles sends text to chatID split into multi-bubble messages with typing
+// delays, reusing the same delivery path as handleUpdate. Safe for concurrent use.
+func (c *TelegramChannel) SendBubbles(ctx context.Context, chatID int64, text string) error {
+	bubbles := SplitBubbles(text, 4096)
+	for i, bubble := range bubbles {
+		if i > 0 {
+			if _, err := c.bot.SendChatAction(ctx, &bot.SendChatActionParams{
+				ChatID: chatID,
+				Action: models.ChatActionTyping,
+			}); err != nil {
+				log.Printf("[scheduler] send typing action failed: %v", err)
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if _, err := c.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID:    chatID,
+			Text:      bubble,
+			ParseMode: models.ParseModeMarkdownV1,
+		}); err != nil {
+			return fmt.Errorf("send bubble to %d: %w", chatID, err)
+		}
+	}
+	return nil
 }

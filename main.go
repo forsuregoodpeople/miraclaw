@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/miraclaw/orchestra/channels"
 	"github.com/miraclaw/orchestra/embedders"
 	"github.com/miraclaw/orchestra/providers"
+	"github.com/miraclaw/orchestra/scheduler"
 	"github.com/miraclaw/orchestra/security"
 	"github.com/miraclaw/orchestra/skills"
 )
@@ -36,6 +38,23 @@ func init() {
 			if err := config.RunPairingSetup(cfg); err != nil {
 				log.Fatalf("pairing: %v", err)
 			}
+			os.Exit(0)
+		case "--detach":
+			// Re-launch without --detach as a detached background process
+			args := make([]string, 0, len(os.Args)-1)
+			for _, a := range os.Args[1:] {
+				if a != "--detach" {
+					args = append(args, a)
+				}
+			}
+			cmd := exec.Command(os.Args[0], args...)
+			cmd.Stdin = nil
+			cmd.Stdout = nil
+			cmd.Stderr = nil
+			if err := cmd.Start(); err != nil {
+				log.Fatalf("detach: %v", err)
+			}
+			log.Printf("Detached as PID %d", cmd.Process.Pid)
 			os.Exit(0)
 		}
 	}
@@ -71,6 +90,29 @@ func main() {
 		log.Fatalf("qdrant: %v", err)
 	}
 
+	// Seed built-in knowledge and identity into Qdrant static (idempotent)
+	orchestra.SeedKnowledge(ctx, mem)
+	orchestra.SeedIdentity(ctx, mem, cfg.Agent.BotName)
+	// Load optional user-provided knowledge file
+	if cfg.Agent.AgentMD != "" {
+		if err := orchestra.LoadKnowledgeFile(ctx, cfg.Agent.AgentMD, mem); err != nil {
+			log.Printf("warn: knowledge file: %v", err)
+		}
+	}
+
+	// Flush pending system_prompt from setup wizard into Qdrant static, then clear it from config
+	if cfg.Agent.SystemPrompt != "" {
+		if err := mem.AddStatic(ctx, "setup-persona", cfg.Agent.SystemPrompt, "agentmd"); err != nil {
+			log.Printf("warn: flush system_prompt to qdrant: %v", err)
+		} else {
+			log.Printf("Persona flushed to Qdrant static knowledge")
+			cfg.Agent.SystemPrompt = ""
+			if err := config.Save(cfg); err != nil {
+				log.Printf("warn: save config after persona flush: %v", err)
+			}
+		}
+	}
+
 	// Activate memory encryption if passphrase is configured
 	if cfg.Security.EncryptionKey != "" {
 		enc, encErr := security.NewEncryptorFromPassphrase(cfg.Security.EncryptionKey)
@@ -91,28 +133,19 @@ func main() {
 	provider := orchestra.NewSwappableLLM(rawProvider)
 
 	limiter := security.NewRateLimiter(security.RateLimiterConfig{
-		Requests: 10,
+		Requests: 50,
 		Window:   time.Minute,
 	})
 
 	sys := orchestra.NewSystem(orchestra.SystemConfig{
-		CmdValidator: security.ValidateCommand,
 		URLValidator: security.ValidateURL,
 	})
 
-	// Register built-in skills
-	skills.RegisterAll(sys)
+	skills.RegisterExecSkill(sys)
 	skills.RegisterMemorySkills(sys, mem)
 
-	// Optional: tambahkan search skill sesuai kebutuhan.
-	// Contoh dengan DuckDuckGo bawaan (butuh TLS cert yang valid):
-	//   sys.Register("websearch", "search the web: input is the query", func(ctx context.Context, input string) (string, error) {
-	//       return skills.WebSearch(ctx, input)
-	//   })
-	// Atau dengan provider lain (SearxNG, Brave, dll):
-	//   sys.Register("websearch", "search the web: input is the query", mySearchHandler)
-
 	agent := orchestra.NewAgent(mem, provider, sys, orchestra.AgentConfig{
+		BotName:            cfg.Agent.BotName,
 		SystemPrompt:       cfg.Agent.SystemPrompt,
 		MaxContextMessages: cfg.Agent.MaxContextMessages,
 		MaxHistoryTurns:    cfg.Agent.MaxHistoryTurns,
@@ -121,6 +154,7 @@ func main() {
 		MaxSummaryLen:      cfg.Agent.MaxSummaryLen,
 		MaxInputLen:        cfg.Agent.MaxInputLen,
 		MaxSkillDescLen:    cfg.Agent.MaxSkillDescLen,
+		ContextWindow:      cfg.Agent.ContextWindow,
 		TextScanner:        security.ScanText,
 	})
 
@@ -130,10 +164,10 @@ func main() {
 	}
 	ch.SetMemory(mem)
 
-	// Setup command handler
 	botCfg := &channels.BotConfig{
 		Provider: cfg.LLM.Provider,
 		Model:    cfg.LLM.Model,
+		BotName:  cfg.Agent.BotName,
 	}
 	var listFn func(ctx context.Context) ([]string, error)
 	if ml, ok := rawProvider.(orchestra.ModelLister); ok {
@@ -156,9 +190,9 @@ func main() {
 		},
 		listFn,
 	)
+	cmdHandler.SetMemory(mem)
 	ch.SetCommands(cmdHandler)
 
-	// Enable pairing gate if a pairing code is configured
 	if cfg.Telegram.PairingID != "" {
 		pairing := channels.NewPairingHandler(
 			cfg.Telegram.PairingID,
@@ -176,6 +210,17 @@ func main() {
 		}
 	}
 
+	sched := scheduler.New(cfg.Schedule.Rules, agent, ch)
+
+	schedSaveFn := func() error {
+		cfg.Schedule.Rules = sched.Rules()
+		return config.Save(cfg)
+	}
+	skills.RegisterScheduleSkills(sys, sched, cfg.Telegram.PairedChatID, schedSaveFn)
+	skills.RegisterPlanSkills(sys, mem)
+
+	sched.Start(ctx)
+
 	log.Printf("Bot started [llm:%s model:%s]", cfg.LLM.Provider, cfg.LLM.Model)
 	ch.Start(ctx)
 }
@@ -192,7 +237,7 @@ func buildEmbedder(cfg *config.Config) (orchestra.Embedder, error) {
 	switch provider {
 	case "gemini":
 		return embedders.NewGeminiEmbedder(key)
-	default: // "openai", "deepseek", "anthropic" all use OpenAI-compatible embeddings
+	default:
 		return embedders.NewOpenAIEmbedder(key), nil
 	}
 }

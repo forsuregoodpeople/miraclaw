@@ -6,7 +6,9 @@ INSTALL_DIR="/usr/local/bin"
 QDRANT_DATA_DIR="$HOME/.miraclaw/qdrant"
 QDRANT_CONFIG_DIR="/etc/qdrant"
 QDRANT_SERVICE="/etc/systemd/system/qdrant.service"
+MIRACLAW_SERVICE="/etc/systemd/system/miraclaw.service"
 MIRACLAW_BIN="$INSTALL_DIR/miraclaw"
+GO_MIN="1.26"
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -27,12 +29,26 @@ require curl
 require go
 require systemctl
 
+# Go version check
+GO_VER=$(go version | awk '{print $3}' | sed 's/go//')
+if ! awk -v v="$GO_VER" -v m="$GO_MIN" 'BEGIN{
+    split(v,a,"."); split(m,b,".")
+    exit ((a[1]+0 > b[1]+0) || (a[1]+0 == b[1]+0 && a[2]+0 >= b[2]+0)) ? 0 : 1
+}'; then
+    die "Go >= $GO_MIN required, found $GO_VER"
+fi
+success "Go $GO_VER OK"
+
 ARCH=$(uname -m)
 case "$ARCH" in
     x86_64)  QDRANT_ARCH="x86_64-unknown-linux-musl" ;;
     aarch64) QDRANT_ARCH="aarch64-unknown-linux-musl" ;;
     *)       die "Unsupported architecture: $ARCH" ;;
 esac
+
+# Determine the actual user (not root) when running via sudo
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 # ── install qdrant ────────────────────────────────────────────────────────────
 
@@ -69,7 +85,7 @@ EOF
     success "Qdrant config written to $QDRANT_CONFIG_DIR/config.yaml"
 fi
 
-# ── systemd service ───────────────────────────────────────────────────────────
+# ── systemd service for Qdrant ────────────────────────────────────────────────
 
 if [[ ! -f "$QDRANT_SERVICE" ]]; then
     info "Creating systemd service for Qdrant..."
@@ -96,7 +112,7 @@ fi
 info "Starting Qdrant..."
 systemctl start qdrant
 
-# wait up to 15s for Qdrant gRPC to be ready
+# wait up to 15s for Qdrant HTTP to be ready
 for i in $(seq 1 15); do
     if curl -sf http://localhost:6333/healthz &>/dev/null; then
         success "Qdrant is running"
@@ -111,13 +127,41 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info "Building MiraClaw..."
 (cd "$SCRIPT_DIR" && go build -o "$MIRACLAW_BIN" .)
+[[ -x "$MIRACLAW_BIN" ]] || die "Build failed: $MIRACLAW_BIN not found"
 success "MiraClaw installed to $MIRACLAW_BIN"
+
+# ── systemd service for MiraClaw ──────────────────────────────────────────────
+
+if [[ ! -f "$MIRACLAW_SERVICE" ]]; then
+    info "Creating systemd service for MiraClaw..."
+    cat > "$MIRACLAW_SERVICE" <<EOF
+[Unit]
+Description=MiraClaw AI Agent
+After=network.target qdrant.service
+Requires=qdrant.service
+
+[Service]
+Type=simple
+User=$REAL_USER
+ExecStart=$MIRACLAW_BIN
+Restart=on-failure
+RestartSec=5
+Environment=HOME=$REAL_HOME
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable miraclaw
+    success "MiraClaw systemd service installed and enabled"
+else
+    # Reload in case binary was updated
+    systemctl daemon-reload
+fi
 
 # ── bashrc integration ────────────────────────────────────────────────────────
 
-# Determine the actual user's bashrc (not root's) when running via sudo
-REAL_USER="${SUDO_USER:-$USER}"
-REAL_HOME=$(eval echo "~$REAL_USER")
 BASHRC="$REAL_HOME/.bashrc"
 MARKER="# miraclaw"
 
@@ -137,9 +181,25 @@ fi
 
 echo
 info "Running MiraClaw setup wizard..."
-sudo -u "$REAL_USER" "$MIRACLAW_BIN" --setup 2>/dev/null || "$MIRACLAW_BIN"
+sudo -u "$REAL_USER" "$MIRACLAW_BIN" --setup || warn "Setup cancelled or failed. Run manually: miraclaw --setup"
+
+# ── start miraclaw service ────────────────────────────────────────────────────
+
+echo
+info "Starting MiraClaw service..."
+systemctl restart miraclaw
+sleep 2
+if systemctl is-active --quiet miraclaw; then
+    success "MiraClaw is running"
+else
+    warn "MiraClaw service failed to start. Check: journalctl -u miraclaw"
+fi
+
+# ── done ──────────────────────────────────────────────────────────────────────
 
 echo
 success "Installation complete!"
-echo "  Start bot : miraclaw"
-echo "  Qdrant    : systemctl status qdrant"
+echo "  Logs       : journalctl -u miraclaw -f"
+echo "  Stop bot   : systemctl stop miraclaw"
+echo "  Reconfigure: miraclaw --setup"
+echo "  Qdrant     : systemctl status qdrant"

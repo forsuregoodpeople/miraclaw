@@ -36,7 +36,7 @@ func (o *OpenAI) ListModels(ctx context.Context) ([]string, error) {
 func (o *OpenAI) Complete(ctx context.Context, req orchestra.Request) (string, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:       openai.ChatModel(o.model),
-		MaxTokens:   openai.Int(int64(req.MaxTokens)),
+		MaxCompletionTokens: openai.Int(int64(req.MaxTokens)),
 		Temperature: openai.Float(float64(req.Temperature)),
 	}
 	for _, m := range req.Messages {

@@ -5,21 +5,33 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
+
+	"github.com/miraclaw/orchestra"
 )
 
 // BotConfig holds runtime-mutable bot configuration exposed to CommandHandler.
 type BotConfig struct {
 	Provider string
 	Model    string
+	BotName  string
+}
+
+// MemoryUpdater is the minimal interface needed by CommandHandler for memory commands.
+type MemoryUpdater interface {
+	AddStatic(ctx context.Context, id, text, category string) error
+	GetStaticByCategory(ctx context.Context, category string) ([]*orchestra.Message, error)
+	ClearAll(ctx context.Context) error
 }
 
 // CommandHandler handles bot slash commands independently of Telegram transport.
 // It is safe for concurrent use as long as the caller manages BotConfig mutations.
 type CommandHandler struct {
-	cfg      *BotConfig
-	closeFn  func(ctx context.Context, channelID string) error // for /new, /clear
-	saveFn   func(model string) error                          // for /model <name>
-	listFn   func(ctx context.Context) ([]string, error)       // for /model (list)
+	cfg     *BotConfig
+	closeFn func(ctx context.Context, channelID string) error // for /new, /clear
+	saveFn  func(model string) error                          // for /model <name>
+	listFn  func(ctx context.Context) ([]string, error)       // for /model (list)
+	mem     MemoryUpdater                                      // for /remember, /identity, /forget
 }
 
 // NewCommandHandler creates a CommandHandler.
@@ -33,6 +45,11 @@ func NewCommandHandler(
 	listFn func(ctx context.Context) ([]string, error),
 ) *CommandHandler {
 	return &CommandHandler{cfg: cfg, closeFn: closeFn, saveFn: saveFn, listFn: listFn}
+}
+
+// SetMemory wires a MemoryUpdater to enable /remember, /identity, and /forget commands.
+func (h *CommandHandler) SetMemory(mem MemoryUpdater) {
+	h.mem = mem
 }
 
 // Handle processes a command string (e.g. "/start", "/model gpt-4o") and returns the reply.
@@ -62,26 +79,77 @@ func (h *CommandHandler) HandleWithChannel(ctx context.Context, text, channelID 
 		return h.handleStatus()
 	case "model":
 		return h.handleModel(ctx, arg)
+	case "remember":
+		return h.handleRemember(ctx, arg)
+	case "identity":
+		return h.handleIdentity(ctx, arg)
+	case "forget":
+		return h.handleForget(ctx)
 	default:
 		return fmt.Sprintf("Unknown command: /%s\nSend /help for the list of available commands.", cmd)
 	}
 }
 
 func (h *CommandHandler) handleStart() string {
-	return "Hello! I'm Sara, your AI assistant.\n\nSend me a message to start chatting. Use /help to see available commands."
+	name := h.cfg.BotName
+	if name == "" {
+		name = "your AI assistant"
+	}
+	return fmt.Sprintf("Hello! I'm %s 👋\n\nSend me a message to start chatting. Use /help to see available commands.", name)
 }
 
 func (h *CommandHandler) handleHelp() string {
 	var b strings.Builder
 	b.WriteString("Commands:\n")
-	b.WriteString("  /start  — show this welcome message\n")
-	b.WriteString("  /new    — start a new conversation (clear history)\n")
-	b.WriteString("  /clear  — alias for /new\n")
-	b.WriteString("  /status — show bot status (provider, model)\n")
-	b.WriteString("  /model  — list available models\n")
+	b.WriteString("  /start    — show this welcome message\n")
+	b.WriteString("  /new      — start a new conversation (clear history)\n")
+	b.WriteString("  /clear    — alias for /new\n")
+	b.WriteString("  /status   — show bot status (provider, model)\n")
+	b.WriteString("  /model    — list available models\n")
 	b.WriteString("  /model <name> — switch to a different model\n")
-	b.WriteString("  /help   — show this message")
+	b.WriteString("  /remember <text> — save something to memory\n")
+	b.WriteString("  /identity <field>:<value> — update identity (e.g. name:Sara, language:Indonesian)\n")
+	b.WriteString("  /forget   — wipe all memory\n")
+	b.WriteString("  /help     — show this message")
 	return b.String()
+}
+
+func (h *CommandHandler) handleRemember(ctx context.Context, text string) string {
+	if h.mem == nil {
+		return "Memory not available."
+	}
+	if text == "" {
+		return "Usage: /remember <text>"
+	}
+	id := fmt.Sprintf("mem-%d", time.Now().UnixNano())
+	if err := h.mem.AddStatic(ctx, id, text, "user"); err != nil {
+		return "Gagal simpan: " + err.Error()
+	}
+	return "✓ Tersimpan: " + text
+}
+
+func (h *CommandHandler) handleIdentity(ctx context.Context, input string) string {
+	if h.mem == nil {
+		return "Memory not available."
+	}
+	if input == "" {
+		return "Usage: /identity <field>:<value> — contoh: /identity name:Sara"
+	}
+	result, err := orchestra.UpdateIdentity(ctx, h.mem, input)
+	if err != nil {
+		return "Gagal update identity: " + err.Error()
+	}
+	return "✓ Identity diupdate: " + result
+}
+
+func (h *CommandHandler) handleForget(ctx context.Context) string {
+	if h.mem == nil {
+		return "Memory not available."
+	}
+	if err := h.mem.ClearAll(ctx); err != nil {
+		return "Gagal hapus memory: " + err.Error()
+	}
+	return "✓ Semua memory dihapus."
 }
 
 func (h *CommandHandler) handleNew(ctx context.Context, channelID string) string {
