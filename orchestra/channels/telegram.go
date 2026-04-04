@@ -86,6 +86,7 @@ type TelegramChannel struct {
 	memory            sessionCloser
 	pairing           *PairingHandler // nil = pairing disabled
 	activeSessions    map[string]struct{}
+	commands          *CommandHandler
 }
 
 func NewTelegramChannel(pairingID, token string, agent *orchestra.Agent, limiter *security.RateLimiter) (*TelegramChannel, error) {
@@ -114,6 +115,11 @@ func (c *TelegramChannel) SetMemory(m sessionCloser) {
 // SetPairing enables the pairing gate.
 func (c *TelegramChannel) SetPairing(p *PairingHandler) {
 	c.pairing = p
+}
+
+// SetCommands enables slash command handling.
+func (c *TelegramChannel) SetCommands(h *CommandHandler) {
+	c.commands = h
 }
 
 func (c *TelegramChannel) Start(ctx context.Context) {
@@ -150,21 +156,37 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, b *bot.Bot, update *
 		reply, handled := c.pairing.Handle(ctx, chatID, update.Message.Text)
 		if handled {
 			if reply != "" {
-				b.SendMessage(ctx, &bot.SendMessageParams{
+				if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
 					ChatID: chatID,
 					Text:   reply,
-				})
+				}); err != nil {
+					log.Printf("send pairing reply failed: %v", err)
+				}
 			}
 			return
 		}
 	}
 
+	// Command routing — bypass rate limiter
+	if c.commands != nil && strings.HasPrefix(update.Message.Text, "/") {
+		reply := c.commands.HandleWithChannel(ctx, update.Message.Text, channelID)
+		if _, err := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   reply,
+		}); err != nil {
+			log.Printf("send command reply failed: %v", err)
+		}
+		return
+	}
+
 	if c.limiter != nil {
 		if err := c.limiter.Allow(channelID); err != nil {
-			b.SendMessage(ctx, &bot.SendMessageParams{
+			if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{
 				ChatID: chatID,
 				Text:   "Too many requests. Please slow down.",
-			})
+			}); sendErr != nil {
+				log.Printf("send rate-limit reply failed: %v", sendErr)
+			}
 			return
 		}
 	}
@@ -177,9 +199,22 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, b *bot.Bot, update *
 		channelID,
 	)
 
+	if _, err := b.SendChatAction(ctx, &bot.SendChatActionParams{
+		ChatID: chatID,
+		Action: models.ChatActionTyping,
+	}); err != nil {
+		log.Printf("send typing action failed: %v", err)
+	}
+
 	reply, err := c.agent.Reply(ctx, msg)
 	if err != nil {
 		log.Printf("agent reply error: %v", err)
+		if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   "Sorry, I encountered an error. Please try again.",
+		}); sendErr != nil {
+			log.Printf("send error message failed: %v", sendErr)
+		}
 		return
 	}
 
@@ -196,9 +231,12 @@ func (c *TelegramChannel) handleUpdate(ctx context.Context, b *bot.Bot, update *
 		} else {
 			reply = ""
 		}
-		b.SendMessage(ctx, &bot.SendMessageParams{
+		if _, sendErr := b.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID: chatID,
 			Text:   chunk,
-		})
+		}); sendErr != nil {
+			log.Printf("send chunk failed (chatID %d): %v", chatID, sendErr)
+			break
+		}
 	}
 }

@@ -52,5 +52,8 @@ func (g *Gemini) Complete(ctx context.Context, req orchestra.Request) (string, e
 	if err != nil {
 		return "", fmt.Errorf("gemini: %w", err)
 	}
+	if result == nil {
+		return "", fmt.Errorf("gemini: empty response")
+	}
 	return result.Text(), nil
 }

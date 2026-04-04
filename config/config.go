@@ -15,9 +15,13 @@ type Telegram struct {
 }
 
 type Qdrant struct {
-	Host       string `yaml:"host"`
-	Port       int    `yaml:"port"`
-	Collection string `yaml:"collection"`
+	Host            string `yaml:"host"`
+	Port            int    `yaml:"port"`
+	Collection      string `yaml:"collection"`       // base name, dipakai sebagai prefix
+	CollectionSession string `yaml:"collection_session"` // short-term: session aktif saat ini
+	CollectionShortTerm string `yaml:"collection_short_term"` // episodik: session yang sudah selesai, ~7 hari
+	CollectionLongTerm  string `yaml:"collection_long_term"`  // semantik persisten: fakta penting
+	CollectionStatic    string `yaml:"collection_static"`     // knowledge base, tidak berubah oleh conversation
 }
 
 type Agent struct {
@@ -59,9 +63,13 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Qdrant: Qdrant{
-			Host:       "localhost",
-			Port:       6334,
-			Collection: "miraclaw_memory",
+			Host:                "localhost",
+			Port:                6334,
+			Collection:          "miraclaw",
+			CollectionSession:   "miraclaw_session",
+			CollectionShortTerm: "miraclaw_short_term",
+			CollectionLongTerm:  "miraclaw_long_term",
+			CollectionStatic:    "miraclaw_static",
 		},
 		Agent: Agent{
 			MaxContextMessages: 2,
@@ -71,6 +79,10 @@ func DefaultConfig() *Config {
 			MaxSummaryLen:      200,
 			MaxInputLen:        400,
 			MaxSkillDescLen:    40,
+		},
+		LLM: LLMConfig{
+			Provider: "openai",
+			Model:    "gpt-4o-mini",
 		},
 		Embedder: EmbedderConfig{
 			Provider: "openai",

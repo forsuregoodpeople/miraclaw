@@ -18,13 +18,23 @@ import (
 
 func init() {
 	for _, arg := range os.Args[1:] {
-		if arg == "--setup" {
+		switch arg {
+		case "--setup":
 			cfg, _ := config.Load()
 			if cfg == nil {
 				cfg = config.DefaultConfig()
 			}
 			if err := config.RunSetup(cfg); err != nil {
 				log.Fatalf("setup: %v", err)
+			}
+			os.Exit(0)
+		case "--pairing":
+			cfg, err := config.Load()
+			if err != nil {
+				log.Fatalf("config: %v", err)
+			}
+			if err := config.RunPairingSetup(cfg); err != nil {
+				log.Fatalf("pairing: %v", err)
 			}
 			os.Exit(0)
 		}
@@ -51,7 +61,12 @@ func main() {
 		log.Fatalf("embedder: %v", err)
 	}
 
-	mem, err := orchestra.NewMemory(cfg.Qdrant.Host, cfg.Qdrant.Port, cfg.Qdrant.Collection, embedder)
+	mem, err := orchestra.NewMemory(cfg.Qdrant.Host, cfg.Qdrant.Port, orchestra.MemoryCollections{
+		Session:   cfg.Qdrant.CollectionSession,
+		ShortTerm: cfg.Qdrant.CollectionShortTerm,
+		LongTerm:  cfg.Qdrant.CollectionLongTerm,
+		Static:    cfg.Qdrant.CollectionStatic,
+	}, embedder)
 	if err != nil {
 		log.Fatalf("qdrant: %v", err)
 	}
@@ -66,10 +81,14 @@ func main() {
 		log.Println("Memory encryption enabled")
 	}
 
-	provider, err := buildLLM(cfg)
+	rawProvider, err := buildLLM(cfg)
 	if err != nil {
 		log.Fatalf("llm: %v", err)
 	}
+	if rawProvider == nil {
+		log.Fatalf("llm provider not configured — run --setup to set llm.provider")
+	}
+	provider := orchestra.NewSwappableLLM(rawProvider)
 
 	limiter := security.NewRateLimiter(security.RateLimiterConfig{
 		Requests: 10,
@@ -83,6 +102,15 @@ func main() {
 
 	// Register built-in skills
 	skills.RegisterAll(sys)
+	skills.RegisterMemorySkills(sys, mem)
+
+	// Optional: tambahkan search skill sesuai kebutuhan.
+	// Contoh dengan DuckDuckGo bawaan (butuh TLS cert yang valid):
+	//   sys.Register("websearch", "search the web: input is the query", func(ctx context.Context, input string) (string, error) {
+	//       return skills.WebSearch(ctx, input)
+	//   })
+	// Atau dengan provider lain (SearxNG, Brave, dll):
+	//   sys.Register("websearch", "search the web: input is the query", mySearchHandler)
 
 	agent := orchestra.NewAgent(mem, provider, sys, orchestra.AgentConfig{
 		SystemPrompt:       cfg.Agent.SystemPrompt,
@@ -101,6 +129,34 @@ func main() {
 		log.Fatalf("telegram: %v", err)
 	}
 	ch.SetMemory(mem)
+
+	// Setup command handler
+	botCfg := &channels.BotConfig{
+		Provider: cfg.LLM.Provider,
+		Model:    cfg.LLM.Model,
+	}
+	var listFn func(ctx context.Context) ([]string, error)
+	if ml, ok := rawProvider.(orchestra.ModelLister); ok {
+		listFn = ml.ListModels
+	}
+	cmdHandler := channels.NewCommandHandler(
+		botCfg,
+		func(ctx context.Context, channelID string) error {
+			return mem.CloseSession(ctx, channelID)
+		},
+		func(model string) error {
+			cfg.LLM.Model = model
+			botCfg.Model = model
+			newLLM, err := buildLLM(cfg)
+			if err != nil {
+				return err
+			}
+			provider.Swap(newLLM)
+			return config.Save(cfg)
+		},
+		listFn,
+	)
+	ch.SetCommands(cmdHandler)
 
 	// Enable pairing gate if a pairing code is configured
 	if cfg.Telegram.PairingID != "" {
@@ -129,10 +185,14 @@ func buildEmbedder(cfg *config.Config) (orchestra.Embedder, error) {
 	if key == "" {
 		key = cfg.LLM.APIKey
 	}
-	switch cfg.Embedder.Provider {
+	provider := cfg.Embedder.Provider
+	if provider == "" {
+		provider = cfg.LLM.Provider
+	}
+	switch provider {
 	case "gemini":
 		return embedders.NewGeminiEmbedder(key)
-	default: // "openai" dan fallback
+	default: // "openai", "deepseek", "anthropic" all use OpenAI-compatible embeddings
 		return embedders.NewOpenAIEmbedder(key), nil
 	}
 }

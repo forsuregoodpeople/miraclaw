@@ -12,26 +12,30 @@ import (
 	qclient "github.com/qdrant/go-client/qdrant"
 )
 
-// textCodec is a duck-typed interface to avoid a direct import of orchestra/security.
 type textCodec interface {
 	Encrypt(string) (string, error)
 	Decrypt(string) (string, error)
 }
 
-type Memory struct {
-	client     *qclient.Client
-	collection string
-	embedder   Embedder
-	enc        textCodec // optional; nil means plaintext storage
+type MemoryCollections struct {
+	Session   string
+	ShortTerm string
+	LongTerm  string
+	Static    string
 }
 
-// SetEncryptor attaches an encryptor for at-rest text encryption.
-// Must be called before any Add/Search operations.
+type Memory struct {
+	client      *qclient.Client
+	collections MemoryCollections
+	embedder    Embedder
+	enc         textCodec
+}
+
 func (m *Memory) SetEncryptor(enc textCodec) {
 	m.enc = enc
 }
 
-func NewMemory(host string, port int, collection string, embedder Embedder) (*Memory, error) {
+func NewMemory(host string, port int, cols MemoryCollections, embedder Embedder) (*Memory, error) {
 	client, err := qclient.NewClient(&qclient.Config{
 		Host:                   host,
 		Port:                   port,
@@ -51,9 +55,12 @@ func NewMemory(host string, port int, collection string, embedder Embedder) (*Me
 		}
 	}
 
-	mem := &Memory{client: client, collection: collection, embedder: embedder}
-	if err := mem.ensureCollection(context.Background()); err != nil {
-		return nil, err
+	mem := &Memory{client: client, collections: cols, embedder: embedder}
+	ctx := context.Background()
+	for _, col := range []string{cols.Session, cols.ShortTerm, cols.LongTerm, cols.Static} {
+		if err := mem.ensureCollection(ctx, col); err != nil {
+			return nil, fmt.Errorf("ensure collection %q: %w", col, err)
+		}
 	}
 	return mem, nil
 }
@@ -75,19 +82,19 @@ func waitReady(client *qclient.Client) error {
 	}
 }
 
-func (m *Memory) ensureCollection(ctx context.Context) error {
-	exists, err := m.client.CollectionExists(ctx, m.collection)
+func (m *Memory) ensureCollection(ctx context.Context, name string) error {
+	exists, err := m.client.CollectionExists(ctx, name)
 	if err != nil {
 		return fmt.Errorf("check collection: %w", err)
 	}
 	if exists {
-		info, err := m.client.GetCollectionInfo(ctx, m.collection)
+		info, err := m.client.GetCollectionInfo(ctx, name)
 		if err != nil {
 			return fmt.Errorf("get collection info: %w", err)
 		}
 		if info.GetConfig().GetParams().GetVectorsConfig().GetParams().GetSize() != m.embedder.Dimensions() {
-			log.Printf("warn: collection %q has wrong vector size, recreating...", m.collection)
-			if err := m.client.DeleteCollection(ctx, m.collection); err != nil {
+			log.Printf("warn: collection %q has wrong vector size, recreating...", name)
+			if err := m.client.DeleteCollection(ctx, name); err != nil {
 				return fmt.Errorf("delete collection: %w", err)
 			}
 		} else {
@@ -95,7 +102,7 @@ func (m *Memory) ensureCollection(ctx context.Context) error {
 		}
 	}
 	return m.client.CreateCollection(ctx, &qclient.CreateCollection{
-		CollectionName: m.collection,
+		CollectionName: name,
 		VectorsConfig: qclient.NewVectorsConfig(&qclient.VectorParams{
 			Size:     m.embedder.Dimensions(),
 			Distance: qclient.Distance_Cosine,
@@ -103,9 +110,7 @@ func (m *Memory) ensureCollection(ctx context.Context) error {
 	})
 }
 
-// Add embeds and stores a message with role and session metadata.
-// role should be "user" or "assistant".
-func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
+func (m *Memory) upsertPoint(ctx context.Context, collection string, msg *Message, role string) error {
 	vec, err := m.embedder.Embed(ctx, msg.Text)
 	if err != nil {
 		return fmt.Errorf("embed: %w", err)
@@ -120,7 +125,7 @@ func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
 	}
 
 	_, err = m.client.Upsert(ctx, &qclient.UpsertPoints{
-		CollectionName: m.collection,
+		CollectionName: collection,
 		Points: []*qclient.PointStruct{
 			{
 				Id:      qclient.NewIDNum(hashID(msg.ID)),
@@ -129,7 +134,7 @@ func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
 					"id":         msg.ID,
 					"text":       storedText,
 					"channel_id": msg.ChannelID,
-					"session_id": msg.ChannelID, // session_id == channel_id while session active
+					"session_id": msg.ChannelID,
 					"role":       role,
 					"ts":         time.Now().UnixNano(),
 				}),
@@ -139,31 +144,211 @@ func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
 	return err
 }
 
-// AddBotReply stores a bot response message under the given channelID.
+func (m *Memory) Add(ctx context.Context, msg *Message, role string) error {
+	return m.upsertPoint(ctx, m.collections.Session, msg, role)
+}
+
 func (m *Memory) AddBotReply(ctx context.Context, channelID, text string) error {
 	id := fmt.Sprintf("bot-%s-%d", channelID, time.Now().UnixNano())
 	msg := NewMessage(id, text, channelID)
 	return m.Add(ctx, msg, "assistant")
 }
 
-// GetSession returns the N most recent messages for the active session (channelID).
-// Results are ordered by timestamp ascending (oldest first).
+func (m *Memory) AddStatic(ctx context.Context, id, text, category string) error {
+	msg := NewMessage(id, text, category)
+	return m.upsertPoint(ctx, m.collections.Static, msg, "static")
+}
+
 func (m *Memory) GetSession(ctx context.Context, channelID string, limit uint64) ([]*Message, error) {
-	lim := uint32(limit)
+	var bigLim uint32 = 1000
 	results, err := m.client.Scroll(ctx, &qclient.ScrollPoints{
-		CollectionName: m.collection,
+		CollectionName: m.collections.Session,
 		Filter: &qclient.Filter{
 			Must: []*qclient.Condition{
 				qclient.NewMatch("session_id", channelID),
 			},
 		},
-		Limit:       &lim,
+		Limit:       &bigLim,
 		WithPayload: qclient.NewWithPayload(true),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get session: %w", err)
 	}
 
+	msgs := m.parseTimestamped(results)
+	if limit > 0 && uint64(len(msgs)) > limit {
+		msgs = msgs[uint64(len(msgs))-limit:]
+	}
+	return msgs, nil
+}
+
+func (m *Memory) CloseSession(ctx context.Context, channelID string) error {
+	var bigLimit uint32 = 1000
+	results, err := m.client.Scroll(ctx, &qclient.ScrollPoints{
+		CollectionName: m.collections.Session,
+		Filter: &qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewMatch("session_id", channelID),
+			},
+		},
+		Limit:       &bigLimit,
+		WithPayload: qclient.NewWithPayload(true),
+		WithVectors: qclient.NewWithVectors(true),
+	})
+	if err != nil {
+		return fmt.Errorf("read session for close: %w", err)
+	}
+
+	if len(results) > 0 {
+		var points []*qclient.PointStruct
+		for _, r := range results {
+			vec := vectorOutputToFloat32(r.GetVectors())
+			if vec == nil {
+				continue
+			}
+			points = append(points, &qclient.PointStruct{
+				Id:      r.GetId(),
+				Vectors: qclient.NewVectors(vec...),
+				Payload: r.GetPayload(),
+			})
+		}
+		if len(points) > 0 {
+			if _, err := m.client.Upsert(ctx, &qclient.UpsertPoints{
+				CollectionName: m.collections.ShortTerm,
+				Points:         points,
+			}); err != nil {
+				return fmt.Errorf("promote to short-term: %w", err)
+			}
+		}
+	}
+
+	_, err = m.client.Delete(ctx, &qclient.DeletePoints{
+		CollectionName: m.collections.Session,
+		Points: qclient.NewPointsSelectorFilter(&qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewMatch("session_id", channelID),
+			},
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("close session: %w", err)
+	}
+	return nil
+}
+
+func (m *Memory) Search(ctx context.Context, channelID, query string, topN uint64) ([]*Message, error) {
+	vec, err := m.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+
+	half := topN/2 + 1
+	shortResults, err := m.queryCollection(ctx, m.collections.ShortTerm, vec, half, channelID)
+	if err != nil {
+		log.Printf("warn: search short-term failed: %v", err)
+	}
+	longResults, err := m.queryCollection(ctx, m.collections.LongTerm, vec, half, channelID)
+	if err != nil {
+		log.Printf("warn: search long-term failed: %v", err)
+	}
+
+	merged := append(shortResults, longResults...)
+	if uint64(len(merged)) > topN {
+		merged = merged[:topN]
+	}
+	return merged, nil
+}
+
+func (m *Memory) SearchStatic(ctx context.Context, channelID, query string, topN uint64) ([]*Message, error) {
+	vec, err := m.embedder.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("embed query: %w", err)
+	}
+	return m.queryCollection(ctx, m.collections.Static, vec, topN, channelID)
+}
+
+func (m *Memory) PromoteToLongTerm(ctx context.Context, msgID string) error {
+	var lim uint32 = 1
+	results, err := m.client.Scroll(ctx, &qclient.ScrollPoints{
+		CollectionName: m.collections.ShortTerm,
+		Filter: &qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewMatch("id", msgID),
+			},
+		},
+		Limit:       &lim,
+		WithPayload: qclient.NewWithPayload(true),
+		WithVectors: qclient.NewWithVectors(true),
+	})
+	if err != nil {
+		return fmt.Errorf("find in short-term: %w", err)
+	}
+	if len(results) == 0 {
+		return fmt.Errorf("message %q not found in short-term", msgID)
+	}
+
+	r := results[0]
+	vec := vectorOutputToFloat32(r.GetVectors())
+	if vec == nil {
+		return fmt.Errorf("message %q has no vector data", msgID)
+	}
+	if _, err := m.client.Upsert(ctx, &qclient.UpsertPoints{
+		CollectionName: m.collections.LongTerm,
+		Points: []*qclient.PointStruct{
+			{
+				Id:      r.GetId(),
+				Vectors: qclient.NewVectors(vec...),
+				Payload: r.GetPayload(),
+			},
+		},
+	}); err != nil {
+		return fmt.Errorf("promote to long-term: %w", err)
+	}
+	return nil
+}
+
+func (m *Memory) queryCollection(ctx context.Context, collection string, vec []float32, topN uint64, channelID string) ([]*Message, error) {
+	req := &qclient.QueryPoints{
+		CollectionName: collection,
+		Query:          qclient.NewQuery(vec...),
+		Limit:          &topN,
+		WithPayload:    qclient.NewWithPayload(true),
+	}
+	if channelID != "" {
+		req.Filter = &qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewMatch("channel_id", channelID),
+			},
+		}
+	}
+	results, err := m.client.Query(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	msgs := make([]*Message, 0, len(results))
+	for _, r := range results {
+		p := r.GetPayload()
+		text := p["text"].GetStringValue()
+		if m.enc != nil {
+			decrypted, decErr := m.enc.Decrypt(text)
+			if decErr != nil {
+				log.Printf("warn: memory decrypt failed: %v", decErr)
+				continue
+			}
+			text = decrypted
+		}
+		msgs = append(msgs, &Message{
+			ID:        p["id"].GetStringValue(),
+			Text:      text,
+			ChannelID: p["channel_id"].GetStringValue(),
+			Role:      p["role"].GetStringValue(),
+		})
+	}
+	return msgs, nil
+}
+
+func (m *Memory) parseTimestamped(results []*qclient.RetrievedPoint) []*Message {
 	type timestamped struct {
 		msg *Message
 		ts  int64
@@ -185,6 +370,7 @@ func (m *Memory) GetSession(ctx context.Context, channelID string, limit uint64)
 				ID:        p["id"].GetStringValue(),
 				Text:      text,
 				ChannelID: p["channel_id"].GetStringValue(),
+				Role:      p["role"].GetStringValue(),
 			},
 			ts: p["ts"].GetIntegerValue(),
 		})
@@ -198,62 +384,19 @@ func (m *Memory) GetSession(ctx context.Context, channelID string, limit uint64)
 	for i, item := range items {
 		msgs[i] = item.msg
 	}
-	return msgs, nil
+	return msgs
 }
 
-// CloseSession deletes all points tagged with session_id == channelID.
-// Call this when a session ends to free Qdrant space while preserving long-term memory.
-func (m *Memory) CloseSession(ctx context.Context, channelID string) error {
-	_, err := m.client.Delete(ctx, &qclient.DeletePoints{
-		CollectionName: m.collection,
-		Points: qclient.NewPointsSelectorFilter(&qclient.Filter{
-			Must: []*qclient.Condition{
-				qclient.NewMatch("session_id", channelID),
-			},
-		}),
-	})
-	if err != nil {
-		return fmt.Errorf("close session: %w", err)
+func vectorOutputToFloat32(vo *qclient.VectorsOutput) []float32 {
+	if vo == nil {
+		return nil
+	}
+	if v, ok := vo.GetVectorsOptions().(*qclient.VectorsOutput_Vector); ok {
+		if v.Vector != nil {
+			return v.Vector.GetData()
+		}
 	}
 	return nil
-}
-
-// Search performs a semantic similarity search, returning the top-N relevant messages
-// across all channels (long-term memory, no session filter).
-func (m *Memory) Search(ctx context.Context, query string, topN uint64) ([]*Message, error) {
-	vec, err := m.embedder.Embed(ctx, query)
-	if err != nil {
-		return nil, fmt.Errorf("embed query: %w", err)
-	}
-	results, err := m.client.Query(ctx, &qclient.QueryPoints{
-		CollectionName: m.collection,
-		Query:          qclient.NewQuery(vec...),
-		Limit:          &topN,
-		WithPayload:    qclient.NewWithPayload(true),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	msgs := make([]*Message, 0, len(results))
-	for _, r := range results {
-		p := r.GetPayload()
-		text := p["text"].GetStringValue()
-		if m.enc != nil {
-			decrypted, decErr := m.enc.Decrypt(text)
-			if decErr != nil {
-				log.Printf("warn: memory decrypt failed: %v", decErr)
-				continue
-			}
-			text = decrypted
-		}
-		msgs = append(msgs, &Message{
-			ID:        p["id"].GetStringValue(),
-			Text:      text,
-			ChannelID: p["channel_id"].GetStringValue(),
-		})
-	}
-	return msgs, nil
 }
 
 func hashID(s string) uint64 {

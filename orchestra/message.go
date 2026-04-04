@@ -5,6 +5,7 @@ type Message struct {
 	ID        string
 	Text      string
 	ChannelID string
+	Role      string // "user" | "assistant" | "system"
 }
 
 // NewMessage creates a new Message.

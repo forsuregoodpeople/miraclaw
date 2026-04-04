@@ -7,7 +7,6 @@ import (
 	"github.com/charmbracelet/huh"
 )
 
-// ANSI color helpers for purple-blue gradient
 func colorRGB(r, g, b int) string {
 	return fmt.Sprintf("\033[38;2;%d;%d;%dm", r, g, b)
 }
@@ -55,8 +54,28 @@ func RunSetup(cfg *Config) error {
 
 	printBanner()
 
+	// ── Confirm update if config already has a token ──────────────────────────
+	if cfg.Telegram.Token != "" {
+		var doUpdate bool
+		err := huh.NewForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Config already exists. Update it?").
+					Description("Choose Yes to edit existing values, No to exit.").
+					Value(&doUpdate),
+			),
+		).Run()
+		if err != nil {
+			return err
+		}
+		if !doUpdate {
+			fmt.Println("Setup cancelled.")
+			return nil
+		}
+	}
+
 	// ── Step 1: Telegram ──────────────────────────────────────────────────────
-	var token, pairingID string
+	token := cfg.Telegram.Token
 	err := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -64,20 +83,15 @@ func RunSetup(cfg *Config) error {
 				Description("Get it from @BotFather on Telegram.").
 				EchoMode(huh.EchoModePassword).
 				Value(&token),
-			huh.NewInput().
-				Title("Telegram Pairing ID").
-				Description("Leave blank to skip.").
-				Value(&pairingID),
 		),
 	).Run()
 	if err != nil {
 		return err
 	}
 	cfg.Telegram.Token = token
-	cfg.Telegram.PairingID = pairingID
 
 	// ── Step 2: LLM Provider ─────────────────────────────────────────────────
-	var llmProvider string
+	llmProvider := cfg.LLM.Provider
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
@@ -97,7 +111,8 @@ func RunSetup(cfg *Config) error {
 	cfg.LLM.Provider = llmProvider
 
 	// ── Step 3: LLM API Key & Model ──────────────────────────────────────────
-	var llmKey, llmModel string
+	llmKey := cfg.LLM.APIKey
+	llmModel := cfg.LLM.Model
 	defaultModel := ProviderDefaultModel(llmProvider)
 	err = huh.NewForm(
 		huh.NewGroup(
@@ -123,7 +138,7 @@ func RunSetup(cfg *Config) error {
 	}
 
 	// ── Step 4: Embedder ─────────────────────────────────────────────────────
-	var embedProvider string
+	embedProvider := cfg.Embedder.Provider
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
@@ -142,7 +157,7 @@ func RunSetup(cfg *Config) error {
 	cfg.Embedder.Provider = embedProvider
 
 	if embedProvider != llmProvider {
-		var embedKey string
+		embedKey := cfg.Embedder.APIKey
 		err = huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
@@ -156,10 +171,12 @@ func RunSetup(cfg *Config) error {
 			return err
 		}
 		cfg.Embedder.APIKey = embedKey
+	} else {
+		cfg.Embedder.APIKey = llmKey
 	}
 
 	// ── Step 5: Agent Persona ────────────────────────────────────────────────
-	var systemPrompt string
+	systemPrompt := cfg.Agent.SystemPrompt
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewText().
@@ -175,7 +192,7 @@ func RunSetup(cfg *Config) error {
 	cfg.Agent.SystemPrompt = systemPrompt
 
 	// ── Step 6: Memory Encryption ────────────────────────────────────────────
-	var encryptMemory bool
+	encryptMemory := cfg.Security.EncryptionKey != ""
 	err = huh.NewForm(
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -189,7 +206,7 @@ func RunSetup(cfg *Config) error {
 	}
 
 	if encryptMemory {
-		var encKey string
+		encKey := cfg.Security.EncryptionKey
 		err = huh.NewForm(
 			huh.NewGroup(
 				huh.NewInput().
@@ -203,6 +220,8 @@ func RunSetup(cfg *Config) error {
 			return err
 		}
 		cfg.Security.EncryptionKey = encKey
+	} else {
+		cfg.Security.EncryptionKey = ""
 	}
 
 	if err := Save(cfg); err != nil {
@@ -210,6 +229,27 @@ func RunSetup(cfg *Config) error {
 	}
 	home, _ := os.UserHomeDir()
 	fmt.Printf("\n✓ Config saved to %s/.miraclaw/config.yaml\n\n", home)
+	return nil
+}
+
+func RunPairingSetup(cfg *Config) error {
+	var pairingID string
+	err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewInput().
+				Title("Pairing Code").
+				Description("Users must send this code to the bot to activate it.").
+				Value(&pairingID),
+		),
+	).Run()
+	if err != nil {
+		return err
+	}
+	cfg.Telegram.PairingID = pairingID
+	if err := Save(cfg); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Pairing code set. Send %q to the bot to activate.\n", pairingID)
 	return nil
 }
 

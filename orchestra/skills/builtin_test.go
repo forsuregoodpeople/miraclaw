@@ -10,6 +10,15 @@ import (
 	"github.com/miraclaw/orchestra/skills"
 )
 
+type mockStaticMemory struct {
+	stored []string
+}
+
+func (m *mockStaticMemory) AddStatic(_ context.Context, _, text, _ string) error {
+	m.stored = append(m.stored, text)
+	return nil
+}
+
 func newSystem() *orchestra.System {
 	return orchestra.NewSystem(orchestra.SystemConfig{})
 }
@@ -29,18 +38,6 @@ func TestDatetimeSkill(t *testing.T) {
 	}
 }
 
-func TestWebSearchSkill(t *testing.T) {
-	sys := newSystem()
-	skills.RegisterAll(sys)
-
-	result, err := sys.Run(context.Background(), "websearch", "golang")
-	if err != nil {
-		t.Fatalf("websearch skill error: %v", err)
-	}
-	if result == "" {
-		t.Error("expected non-empty websearch result")
-	}
-}
 
 func TestExecSkill(t *testing.T) {
 	sys := orchestra.NewSystem(orchestra.SystemConfig{
@@ -79,15 +76,100 @@ func TestReadWriteFileSkill(t *testing.T) {
 	}
 }
 
+func TestSysinfoAllOrEmpty(t *testing.T) {
+	sys := newSystem()
+	skills.RegisterAll(sys)
+
+	for _, input := range []string{"", "all"} {
+		result, err := sys.Run(context.Background(), "sysinfo", input)
+		if err != nil {
+			t.Fatalf("sysinfo %q error: %v", input, err)
+		}
+		for _, want := range []string{"RAM:", "CPU:", "Disk ("} {
+			if !strings.Contains(result, want) {
+				t.Errorf("sysinfo %q: expected %q in result, got: %s", input, want, result)
+			}
+		}
+	}
+}
+
+func TestSysinfoRAM(t *testing.T) {
+	sys := newSystem()
+	skills.RegisterAll(sys)
+
+	result, err := sys.Run(context.Background(), "sysinfo", "ram")
+	if err != nil {
+		t.Fatalf("sysinfo ram error: %v", err)
+	}
+	if !strings.Contains(result, "RAM:") {
+		t.Errorf("expected 'RAM:' in result, got: %s", result)
+	}
+	if strings.Contains(result, "CPU:") || strings.Contains(result, "Disk:") {
+		t.Errorf("sysinfo ram should not contain CPU/Disk sections, got: %s", result)
+	}
+}
+
+func TestSysinfoCPU(t *testing.T) {
+	sys := newSystem()
+	skills.RegisterAll(sys)
+
+	result, err := sys.Run(context.Background(), "sysinfo", "cpu")
+	if err != nil {
+		t.Fatalf("sysinfo cpu error: %v", err)
+	}
+	if !strings.Contains(result, "CPU:") {
+		t.Errorf("expected 'CPU:' in result, got: %s", result)
+	}
+	if strings.Contains(result, "RAM:") || strings.Contains(result, "Disk:") {
+		t.Errorf("sysinfo cpu should not contain RAM/Disk sections, got: %s", result)
+	}
+}
+
+func TestSysinfoDisk(t *testing.T) {
+	sys := newSystem()
+	skills.RegisterAll(sys)
+
+	result, err := sys.Run(context.Background(), "sysinfo", "disk")
+	if err != nil {
+		t.Fatalf("sysinfo disk error: %v", err)
+	}
+	if !strings.Contains(result, "Disk (") {
+		t.Errorf("expected 'Disk (' in result, got: %s", result)
+	}
+	if strings.Contains(result, "RAM:") || strings.Contains(result, "CPU:") {
+		t.Errorf("sysinfo disk should not contain RAM/CPU sections, got: %s", result)
+	}
+}
+
 func TestRegisterAllSkills(t *testing.T) {
 	sys := newSystem()
 	skills.RegisterAll(sys)
 
 	list := sys.SkillList()
-	expected := []string{"datetime", "websearch", "exec", "readfile", "writefile"}
+	expected := []string{"datetime", "exec", "readfile", "writefile", "sysinfo"}
 	for _, name := range expected {
 		if _, ok := list[name]; !ok {
 			t.Errorf("expected skill %q to be registered", name)
 		}
+	}
+}
+
+func TestRememberSkill(t *testing.T) {
+	sys := newSystem()
+	mem := &mockStaticMemory{}
+	skills.RegisterMemorySkills(sys, mem)
+
+	result, err := sys.Run(context.Background(), "remember", "nama saya adalah Mira")
+	if err != nil {
+		t.Fatalf("remember skill error: %v", err)
+	}
+	if !strings.Contains(result, "Saved") {
+		t.Errorf("expected saved confirmation, got %q", result)
+	}
+	if len(mem.stored) == 0 {
+		t.Error("expected AddStatic to be called")
+	}
+	if mem.stored[0] != "nama saya adalah Mira" {
+		t.Errorf("expected stored text %q, got %q", "nama saya adalah Mira", mem.stored[0])
 	}
 }

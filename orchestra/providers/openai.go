@@ -21,6 +21,18 @@ func NewOpenAI(apiKey, model string) *OpenAI {
 	}
 }
 
+func (o *OpenAI) ListModels(ctx context.Context) ([]string, error) {
+	page, err := o.client.Models.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("openai list models: %w", err)
+	}
+	var ids []string
+	for _, m := range page.Data {
+		ids = append(ids, m.ID)
+	}
+	return ids, nil
+}
+
 func (o *OpenAI) Complete(ctx context.Context, req orchestra.Request) (string, error) {
 	params := openai.ChatCompletionNewParams{
 		Model:       openai.ChatModel(o.model),

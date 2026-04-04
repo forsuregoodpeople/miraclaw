@@ -20,6 +20,11 @@ type LLM interface {
 	Complete(ctx context.Context, req Request) (string, error)
 }
 
+// ModelLister is an optional interface for LLM providers that support listing available models.
+type ModelLister interface {
+	ListModels(ctx context.Context) ([]string, error)
+}
+
 // Embedder converts text into a vector for semantic search.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)

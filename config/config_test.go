@@ -39,6 +39,16 @@ func TestSaveAndLoad(t *testing.T) {
 	}
 }
 
+func TestDefaultConfigHasLLMModel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.LLM.Model == "" {
+		t.Error("DefaultConfig should set a default LLM model")
+	}
+	if cfg.LLM.Provider == "" {
+		t.Error("DefaultConfig should set a default LLM provider")
+	}
+}
+
 func TestTelegramStructHasPairedChatID(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Telegram.PairedChatID = 999

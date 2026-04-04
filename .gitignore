@@ -1,0 +1,12 @@
+# Qdrant on-disk data
+/storage/
+
+# Build output
+miraclaw
+
+# Environment / secrets
+.env
+*.env
+
+# macOS
+.DS_Store

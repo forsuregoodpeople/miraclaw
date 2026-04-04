@@ -32,6 +32,9 @@ func (e *GeminiEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	if err != nil {
 		return nil, fmt.Errorf("gemini embed: %w", err)
 	}
+	if result == nil || len(result.Embeddings) == 0 {
+		return nil, fmt.Errorf("gemini embed: empty embeddings response")
+	}
 	raw := result.Embeddings[0].Values
 	vec := make([]float32, len(raw))
 	for i, v := range raw {

@@ -2,6 +2,7 @@ package orchestra_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -10,9 +11,10 @@ import (
 
 // fakeMemory is an in-process Memory substitute for unit tests.
 type fakeMemory struct {
-	added    []*addedEntry
-	session  []*orchestra.Message
-	searched []*orchestra.Message
+	added         []*addedEntry
+	session       []*orchestra.Message
+	searched      []*orchestra.Message
+	staticResults []*orchestra.Message
 }
 
 type addedEntry struct {
@@ -35,12 +37,20 @@ func (f *fakeMemory) GetSession(_ context.Context, _ string, _ uint64) ([]*orche
 	return f.session, nil
 }
 
-func (f *fakeMemory) Search(_ context.Context, _ string, _ uint64) ([]*orchestra.Message, error) {
+func (f *fakeMemory) Search(_ context.Context, _, _ string, _ uint64) ([]*orchestra.Message, error) {
 	return f.searched, nil
 }
 
 func (f *fakeMemory) CloseSession(_ context.Context, _ string) error {
 	f.session = nil
+	return nil
+}
+
+func (f *fakeMemory) SearchStatic(_ context.Context, _, _ string, _ uint64) ([]*orchestra.Message, error) {
+	return f.staticResults, nil
+}
+
+func (f *fakeMemory) AddStatic(_ context.Context, _, _, _ string) error {
 	return nil
 }
 
@@ -131,7 +141,12 @@ func TestAgentReplyUsesRoleBasedMessages(t *testing.T) {
 
 func TestAgentReplySkillDispatch(t *testing.T) {
 	mem := &fakeMemory{}
-	llm := &mockLLM{response: "SKILL:datetime:"}
+	llm := &multiMockLLM{
+		responses: []string{
+			"SKILL:datetime:",          // first call: invoke skill
+			"2026-04-04T00:00:00Z",    // second call: format result
+		},
+	}
 	sys := orchestra.NewSystem(orchestra.SystemConfig{})
 	sys.Register("datetime", "current time", func(_ context.Context, _ string) (string, error) {
 		return "2026-04-04T00:00:00Z", nil
@@ -176,6 +191,130 @@ type testScanError struct{}
 
 func (e *testScanError) Error() string { return "injection detected" }
 
+func TestAgentNilLLMReturnsError(t *testing.T) {
+	mem := &fakeMemory{}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, nil, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg := orchestra.NewMessage("msg-nil", "hello", "chan-nil")
+	_, err := agent.Reply(context.Background(), msg)
+	if err == nil {
+		t.Fatal("expected error when LLM is nil, got nil")
+	}
+}
+
+type errBotReplyMemory struct {
+	fakeMemory
+}
+
+func (e *errBotReplyMemory) AddBotReply(_ context.Context, _ string, _ string) error {
+	return fmt.Errorf("storage full")
+}
+
+func TestAgentAddBotReplyErrorDoesNotPropagate(t *testing.T) {
+	mem := &errBotReplyMemory{}
+	llm := &mockLLM{response: "hi"}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg := orchestra.NewMessage("msg-log", "hello", "chan-log")
+	reply, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("AddBotReply error should not propagate: %v", err)
+	}
+	if reply != "hi" {
+		t.Errorf("expected reply 'hi', got %q", reply)
+	}
+}
+
+// multiMockLLM returns responses in sequence; last response is repeated.
+type multiMockLLM struct {
+	responses []string
+	errors    []error
+	callCount int
+	lastReq   orchestra.Request
+}
+
+func (m *multiMockLLM) Complete(_ context.Context, req orchestra.Request) (string, error) {
+	m.lastReq = req
+	i := m.callCount
+	if i >= len(m.responses) {
+		i = len(m.responses) - 1
+	}
+	m.callCount++
+	var err error
+	if i < len(m.errors) && m.errors[i] != nil {
+		err = m.errors[i]
+	}
+	return m.responses[i], err
+}
+
+func TestAgentSkillResultFormattedBySecondLLMCall(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &multiMockLLM{
+		responses: []string{
+			"SKILL:sysinfo:ram",                // first call: LLM calls skill
+			"RAM server kamu sekarang 10 GB",   // second call: LLM formats result
+		},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	sys.Register("sysinfo", "system info", func(_ context.Context, _ string) (string, error) {
+		return "RAM: Total 29.3 GB | Used 10.0 GB | Available 19.3 GB", nil
+	})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 200})
+
+	msg := orchestra.NewMessage("msg-skill", "berapa RAM sekarang?", "chan-skill")
+	reply, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	if reply != "RAM server kamu sekarang 10 GB" {
+		t.Errorf("expected formatted reply from second LLM call, got %q", reply)
+	}
+	if llm.callCount != 2 {
+		t.Errorf("expected 2 LLM calls (first + format), got %d", llm.callCount)
+	}
+}
+
+func TestAgentUnknownSkillReturnsError(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &mockLLM{response: "SKILL:name:mira"}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg := orchestra.NewMessage("msg-unk", "nama kamu jadi mira ya", "chan-unk")
+	reply, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	if !strings.Contains(reply, "skill name error") {
+		t.Errorf("expected skill-not-found error message, got %q", reply)
+	}
+}
+
+func TestAgentSkillSecondLLMCallFallsBackOnError(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &multiMockLLM{
+		responses: []string{"SKILL:sysinfo:ram", ""},
+		errors:    []error{nil, fmt.Errorf("timeout")},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	sys.Register("sysinfo", "system info", func(_ context.Context, _ string) (string, error) {
+		return "RAM: Total 29.3 GB | Used 10.0 GB | Available 19.3 GB", nil
+	})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 200})
+
+	msg := orchestra.NewMessage("msg-fallback", "berapa RAM?", "chan-fallback")
+	reply, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+	// Should fall back to raw skill output
+	if reply != "RAM: Total 29.3 GB | Used 10.0 GB | Available 19.3 GB" {
+		t.Errorf("expected raw skill result on second LLM error, got %q", reply)
+	}
+}
+
 func TestAgentSessionHistoryIncludedInMessages(t *testing.T) {
 	mem := &fakeMemory{
 		session: []*orchestra.Message{
@@ -196,5 +335,50 @@ func TestAgentSessionHistoryIncludedInMessages(t *testing.T) {
 	// The LLM should have received more than just the current user message
 	if len(llm.lastReq.Messages) < 2 {
 		t.Errorf("expected session history to be included in LLM messages, got %d messages", len(llm.lastReq.Messages))
+	}
+}
+
+func TestAgentSessionRolesPreservedInLLMMessages(t *testing.T) {
+	// Session messages with explicit Role set — buildMessages must use Role, not ID-prefix heuristic.
+	userMsg := orchestra.NewMessage("user-111", "what is Go?", "chan-6")
+	userMsg.Role = "user"
+	botMsg := orchestra.NewMessage("bot-reply-222", "Go is a language.", "chan-6")
+	botMsg.Role = "assistant"
+
+	mem := &fakeMemory{session: []*orchestra.Message{userMsg, botMsg}}
+	llm := &mockLLM{response: "ok"}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg := orchestra.NewMessage("msg-6", "tell me more", "chan-6")
+	_, err := agent.Reply(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("Reply error: %v", err)
+	}
+
+	// Find the session messages in LLM request (exclude system and final user input)
+	var sessionMsgs []orchestra.ChatMessage
+	for _, m := range llm.lastReq.Messages {
+		if m.Role != "system" {
+			sessionMsgs = append(sessionMsgs, m)
+		}
+	}
+
+	// Should have: user history, bot history, current user input — at least 3
+	if len(sessionMsgs) < 3 {
+		t.Fatalf("expected at least 3 non-system messages, got %d: %+v", len(sessionMsgs), sessionMsgs)
+	}
+
+	// First two must be "user" then "assistant" from session history
+	if sessionMsgs[0].Role != "user" {
+		t.Errorf("expected session[0] role 'user', got %q", sessionMsgs[0].Role)
+	}
+	if sessionMsgs[1].Role != "assistant" {
+		t.Errorf("expected session[1] role 'assistant', got %q", sessionMsgs[1].Role)
+	}
+	// Last must be current user input
+	last := sessionMsgs[len(sessionMsgs)-1]
+	if last.Role != "user" || last.Content != "tell me more" {
+		t.Errorf("expected last message to be user 'tell me more', got role=%q content=%q", last.Role, last.Content)
 	}
 }

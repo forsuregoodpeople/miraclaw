@@ -3,28 +3,29 @@ package orchestra
 import (
 	"context"
 	"fmt"
+	"log"
 	"strings"
 )
 
-// AgentMemory is the interface Agent uses for memory operations.
-// This allows unit tests to inject a fake without a real Qdrant instance.
 type AgentMemory interface {
 	Add(ctx context.Context, msg *Message, role string) error
 	AddBotReply(ctx context.Context, channelID, text string) error
 	GetSession(ctx context.Context, channelID string, limit uint64) ([]*Message, error)
-	Search(ctx context.Context, query string, topN uint64) ([]*Message, error)
 	CloseSession(ctx context.Context, channelID string) error
+	Search(ctx context.Context, channelID, query string, topN uint64) ([]*Message, error)
+	SearchStatic(ctx context.Context, channelID, query string, topN uint64) ([]*Message, error)
+	AddStatic(ctx context.Context, id, text, category string) error
 }
 
 type AgentConfig struct {
 	SystemPrompt       string
 	MaxContextMessages int
-	MaxHistoryTurns    int // max session messages to include in prompt
+	MaxHistoryTurns    int
 	MaxMessageLen      int // max chars per context snippet
 	MaxOutputTokens    int
-	MaxSummaryLen      int // unused — kept for config compatibility
-	MaxInputLen        int // max chars for user input before truncation
-	MaxSkillDescLen    int // max chars per skill description
+	MaxSummaryLen      int                // unused — kept for config compatibility
+	MaxInputLen        int                // max chars for user input before truncation
+	MaxSkillDescLen    int                // max chars per skill description
 	TextScanner        func(string) error // optional: security.ScanText
 }
 
@@ -47,6 +48,10 @@ func NewAgent(memory AgentMemory, llm LLM, system *System, cfg AgentConfig) *Age
 }
 
 func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
+	if a.llm == nil {
+		return "", fmt.Errorf("no LLM provider configured")
+	}
+
 	// 1. Store user message to Qdrant
 	if err := a.memory.Add(ctx, msg, "user"); err != nil {
 		return "", fmt.Errorf("memory add: %w", err)
@@ -69,18 +74,25 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		return "", fmt.Errorf("get session: %w", err)
 	}
 
-	// 4. Query Qdrant: semantic search (long-term)
+	// 4. Query Qdrant: semantic search (short-term + long-term)
 	maxCtx := a.cfg.MaxContextMessages
 	if maxCtx <= 0 {
 		maxCtx = 2
 	}
-	related, err := a.memory.Search(ctx, msg.Text, uint64(maxCtx))
+	related, err := a.memory.Search(ctx, msg.ChannelID, msg.Text, uint64(maxCtx))
 	if err != nil {
 		return "", fmt.Errorf("memory search: %w", err)
 	}
 
+	// 4b. Query static knowledge base
+	static, err := a.memory.SearchStatic(ctx, msg.ChannelID, msg.Text, uint64(maxCtx))
+	if err != nil {
+		log.Printf("warn: static search: %v", err)
+		static = nil
+	}
+
 	// 5. Build role-based messages and call LLM
-	messages := a.buildMessages(msg.Text, session, related)
+	messages := a.buildMessages(msg.Text, session, related, static)
 	maxOut := a.cfg.MaxOutputTokens
 	if maxOut <= 0 {
 		maxOut = 1024
@@ -100,22 +112,37 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		if skillErr != nil {
 			resp = fmt.Sprintf("skill %s error: %v", name, skillErr)
 		} else {
-			resp = result
+			// Second LLM call: format skill result into a natural reply
+			userQuestion := messages[len(messages)-1].Content
+			formatted, fmtErr := a.llm.Complete(ctx, Request{
+				Messages: []ChatMessage{
+					{Role: "system", Content: "Answer the user's question naturally using the data provided. Be concise."},
+					{Role: "user", Content: userQuestion},
+					{Role: "assistant", Content: "SKILL:" + name + ":" + input},
+					{Role: "user", Content: "Result: " + result},
+				},
+				MaxTokens:   maxOut,
+				Temperature: 0.7,
+			})
+			if fmtErr == nil {
+				resp = formatted
+			} else {
+				resp = result
+			}
 		}
 	}
 
 	// 7. Store bot reply to Qdrant
 	if err := a.memory.AddBotReply(ctx, msg.ChannelID, resp); err != nil {
-		// non-fatal: log but don't fail the reply
-		_ = err
+		log.Printf("warn: memory add bot reply: %v", err)
 	}
 
 	return resp, nil
 }
 
 // buildMessages assembles the []ChatMessage to send to the LLM.
-// Order: system prompt → skills → long-term background → session history → current user input.
-func (a *Agent) buildMessages(input string, session, related []*Message) []ChatMessage {
+// Order: system prompt → skills → static knowledge → episodik background → session history → current user input.
+func (a *Agent) buildMessages(input string, session, related, static []*Message) []ChatMessage {
 	var msgs []ChatMessage
 
 	maxSnip := a.cfg.MaxMessageLen
@@ -138,13 +165,13 @@ func (a *Agent) buildMessages(input string, session, related []*Message) []ChatM
 		sysContent.WriteByte('\n')
 	}
 
-	// Skills list
+	// Skills list — always injected by the agent, not dependent on user's system prompt
 	if skills := a.system.SkillList(); len(skills) > 0 {
-		sysContent.WriteString("Skills (reply SKILL:name:input to call):")
+		sysContent.WriteString("You have skills to fulfill user requests. Reply EXACTLY with SKILL:<skill>:<input> and nothing else when using a skill. Available skills:")
 		for name, desc := range skills {
 			fmt.Fprintf(&sysContent, " %s(%s)", name, trunc(desc, maxDesc))
 		}
-		sysContent.WriteByte('\n')
+		sysContent.WriteString("\nRULES: (1) When user asks to remember/save/store anything → call SKILL:remember:<text>. (2) When user shares their name/preference → call SKILL:remember:<fact>. (3) Never refuse a skill — if a skill matches, always call it.\n")
 	}
 
 	// OS info
@@ -155,7 +182,19 @@ func (a *Agent) buildMessages(input string, session, related []*Message) []ChatM
 		msgs = append(msgs, ChatMessage{Role: "system", Content: strings.TrimSpace(sysContent.String())})
 	}
 
-	// Long-term background context (deduplicate against session)
+	// Koridor 4: static knowledge (berlaku selamanya, tidak berubah oleh conversation)
+	var staticParts []string
+	for _, m := range static {
+		staticParts = append(staticParts, trunc(m.Text, maxSnip))
+	}
+	if len(staticParts) > 0 {
+		msgs = append(msgs, ChatMessage{
+			Role:    "system",
+			Content: "Knowledge: " + strings.Join(staticParts, " | "),
+		})
+	}
+
+	// Koridor 2 & 3: episodik background — short-term + long-term (deduplicate against session)
 	sessionIDs := make(map[string]struct{}, len(session))
 	for _, m := range session {
 		sessionIDs[m.ID] = struct{}{}
@@ -179,11 +218,9 @@ func (a *Agent) buildMessages(input string, session, related []*Message) []ChatM
 		if m.ID == "" {
 			continue
 		}
-		// We don't have role stored in Message yet — use a heuristic:
-		// messages stored as "user" have no "bot-" prefix on ID; assistant replies have "bot-" prefix.
-		role := "user"
-		if strings.HasPrefix(m.ID, "bot-") {
-			role = "assistant"
+		role := m.Role
+		if role == "" {
+			role = "user" // backward-compat: old records without role field
 		}
 		msgs = append(msgs, ChatMessage{Role: role, Content: trunc(m.Text, maxInput)})
 	}
