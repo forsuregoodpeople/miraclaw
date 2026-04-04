@@ -91,7 +91,7 @@ Architecture: `x86_64` or `aarch64` (Linux only).
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nicholasgasior/MiraClaw/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/forsuregoodpeople/miraclaw/main/install.sh | sudo bash
 ```
 
 No clone needed. The installer will:
@@ -116,7 +116,7 @@ miraclaw --setup                  # reconfigure
 ### From a local clone
 
 ```bash
-git clone https://github.com/nicholasgasior/MiraClaw
+git clone https://github.com/forsuregoodpeople/miraclaw.git
 cd MiraClaw
 sudo bash install.sh
 ```
