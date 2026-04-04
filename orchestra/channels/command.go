@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -70,7 +71,7 @@ func (h *CommandHandler) HandleWithChannel(ctx context.Context, text, channelID 
 
 	switch cmd {
 	case "start":
-		return h.handleStart()
+		return h.handleStart(ctx, channelID)
 	case "help":
 		return h.handleHelp()
 	case "new", "clear":
@@ -90,7 +91,15 @@ func (h *CommandHandler) HandleWithChannel(ctx context.Context, text, channelID 
 	}
 }
 
-func (h *CommandHandler) handleStart() string {
+func (h *CommandHandler) handleStart(ctx context.Context, channelID string) string {
+	// Clear session on /start to ensure fresh conversation
+	if h.closeFn != nil && channelID != "" {
+		if err := h.closeFn(ctx, channelID); err != nil {
+			log.Printf("warn: /start clear session failed: %v", err)
+			// Continue anyway - don't block the start command
+		}
+	}
+	
 	name := h.cfg.BotName
 	if name == "" {
 		name = "your AI assistant"
