@@ -9,8 +9,9 @@ import (
 )
 
 type Telegram struct {
-	PairingID string `yaml:"pairing_id"`
-	Token     string `yaml:"token"`
+	PairingID    string `yaml:"pairing_id"`
+	Token        string `yaml:"token"`
+	PairedChatID int64  `yaml:"paired_chat_id"` // 0 = not paired yet
 }
 
 type Qdrant struct {
@@ -75,6 +76,24 @@ func DefaultConfig() *Config {
 			Provider: "openai",
 		},
 	}
+}
+
+// Save persists cfg to ~/.miraclaw/config.yaml.
+func Save(cfg *Config) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("could not find home dir: %w", err)
+	}
+	dir := filepath.Join(home, ".miraclaw")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	path := filepath.Join(dir, "config.yaml")
+	return os.WriteFile(path, data, 0600)
 }
 
 func Load() (*Config, error) {
