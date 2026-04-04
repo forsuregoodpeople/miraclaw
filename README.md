@@ -10,6 +10,8 @@
 
 **The most token-efficient self-hosted AI agent — OpenClaw-compatible, built for people who care about every token.**
 
+> ⚠️ **Alpha Version** — MiraClaw is currently in alpha. APIs, configuration formats, and behavior may change without notice. Not recommended for production use yet.
+
 ---
 
 ## What is MiraClaw?

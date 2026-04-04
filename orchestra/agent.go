@@ -19,10 +19,9 @@ type AgentMemory interface {
 	GetStaticByCategory(ctx context.Context, category string) ([]*Message, error)
 }
 
-
 type AgentConfig struct {
-	BotName            string             // injected as identity anchor in every system prompt
-	SystemPrompt       string             // additional persona/context appended after mandatory rules
+	BotName            string // injected as identity anchor in every system prompt
+	SystemPrompt       string // additional persona/context appended after mandatory rules
 	MaxContextMessages int
 	MaxHistoryTurns    int
 	MaxMessageLen      int // max chars per context snippet
