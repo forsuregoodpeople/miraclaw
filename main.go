@@ -114,6 +114,9 @@ func main() {
 		// Seed identity if not exists
 		orchestra.SeedIdentity(ctx, mem, cfg.Agent.BotName)
 
+		// Seed built-in knowledge (skill usage, examples, scheduling)
+		orchestra.SeedKnowledge(ctx, mem)
+
 		// Load optional user-provided knowledge file
 		if cfg.Agent.AgentMD != "" {
 			if err := orchestra.LoadKnowledgeFile(ctx, cfg.Agent.AgentMD, mem); err != nil {

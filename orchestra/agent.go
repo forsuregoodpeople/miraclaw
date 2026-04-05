@@ -114,8 +114,9 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		}
 	}
 
-	// 2b. Auto-extract preferences from user message (backup if LLM doesn't call skill)
-	go a.autoExtractPreference(ctx, msg)
+	// 2b. Auto-extract preferences from user message (backup if LLM doesn't call skill).
+	// Use background context so the goroutine isn't cancelled when the request context ends.
+	go a.autoExtractPreference(context.Background(), msg)
 
 	// 3. Query Qdrant: session messages (short-term)
 	maxTurns := a.cfg.MaxHistoryTurns
@@ -253,13 +254,14 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 	return resp, nil
 }
 
-// buildMessages assembles the []ChatMessage to send to the LLM.
-// Order: system prompt → identity → user prefs → skills → static knowledge → episodik background → session history → current user input.
+// buildMessagesEfficient assembles the []ChatMessage to send to the LLM.
+// Order: system prompt (persona+bubble+skills) → identity → user prefs → episodic background → session history → current user input.
 // If ContextWindow > 0, lower-priority segments (episodic background, then oldest session turns) are trimmed to stay within budget.
-func (a *Agent) buildMessages(input string, session, related, static, identity, userPrefs []*Message) []ChatMessage {
+// Parameters identity, userPrefs, and related are pre-fetched in Reply() to avoid duplicate Qdrant calls.
+func (a *Agent) buildMessagesEfficient(_ context.Context, input string, session, related, identity, userPrefs []*Message) []ChatMessage {
 	maxSnip := a.cfg.MaxMessageLen
 	if maxSnip <= 0 {
-		maxSnip = 120
+		maxSnip = 400
 	}
 	maxInput := a.cfg.MaxInputLen
 	if maxInput <= 0 {
@@ -270,10 +272,9 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		maxDesc = 40
 	}
 
-	// System prompt / persona
+	// ── Segment 1: System prompt / persona (hardcoded, never trimmed) ─────────
 	var sysContent strings.Builder
 
-	// Persona prompt — aspiration-based, unlocks full LLM potential
 	now := time.Now()
 	fmt.Fprintf(&sysContent, "Current date: %s, %d %s %d.\n", now.Weekday(), now.Day(), now.Month(), now.Year())
 	sysContent.WriteString(prompts.CorePersona)
@@ -283,9 +284,7 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 	sysContent.WriteString(prompts.ResponseConstraints)
 	sysContent.WriteByte('\n')
 
-	// Identity — fetched from Qdrant static category="identity", guaranteed retrieval.
-	// Storage format is "key: value" (e.g. "name: Sara", "language: Indonesian").
-	// Translate to prose for the LLM system prompt.
+	// Identity — storage format is "key: value" (e.g. "name: Sara", "language: Indonesian").
 	var lang string
 	if len(identity) > 0 {
 		for _, m := range identity {
@@ -314,12 +313,11 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 	} else if a.cfg.BotName != "" {
 		fmt.Fprintf(&sysContent, prompts.IdentityNameTemplate, a.cfg.BotName)
 	}
-	// Language directive — explicit top-level rule so LLM cannot ignore it
 	if lang != "" {
 		fmt.Fprintf(&sysContent, prompts.LanguageRuleTemplate, lang)
 	}
 
-	// User preferences — guaranteed retrieval from static category="user"
+	// User preferences
 	if len(userPrefs) > 0 {
 		sysContent.WriteString(prompts.UserPrefsHeader)
 		for _, m := range userPrefs {
@@ -338,7 +336,7 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		sysContent.WriteByte('\n')
 	}
 
-	// Skills list — always injected
+	// Skills list — always injected so LLM knows SKILL:name:input format
 	if skills := a.system.SkillList(); len(skills) > 0 {
 		sysContent.WriteString(prompts.SkillRulesHeader)
 		for name, desc := range skills {
@@ -367,24 +365,12 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		sysContent.WriteString(prompts.SkillSilentReminder)
 	}
 
-	// ── Segment 1: System prompt / persona (never trimmed) ───────────────────
 	var systemMsgs []ChatMessage
 	if sysContent.Len() > 0 {
 		systemMsgs = append(systemMsgs, ChatMessage{Role: "system", Content: strings.TrimSpace(sysContent.String())})
 	}
 
-	// ── Segment 2: Static knowledge (never trimmed) ───────────────────────────
-	var staticMsgs []ChatMessage
-	for _, m := range static {
-		if text := strings.TrimSpace(m.Text); text != "" {
-			staticMsgs = append(staticMsgs, ChatMessage{
-				Role:    "system",
-				Content: "Static: " + trunc(text, maxSnip),
-			})
-		}
-	}
-
-	// ── Segment 3: Episodic background (trimmed first if over budget) ─────────
+	// ── Segment 2: Episodic background (pre-fetched related, deduped against session) ──
 	sessionIDs := make(map[string]struct{}, len(session))
 	for _, m := range session {
 		sessionIDs[m.ID] = struct{}{}
@@ -403,7 +389,7 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		})
 	}
 
-	// ── Segment 4: Session history (oldest trimmed second) ────────────────────
+	// ── Segment 3: Session history (oldest trimmed if over budget) ────────────
 	var sessionMsgs []ChatMessage
 	for _, m := range session {
 		if m.ID == "" {
@@ -411,18 +397,17 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		}
 		role := m.Role
 		if role == "" {
-			role = "user" // backward-compat: old records without role field
+			role = "user"
 		}
 		sessionMsgs = append(sessionMsgs, ChatMessage{Role: role, Content: trunc(m.Text, maxInput)})
 	}
 
-	// ── Segment 5: Current user input (never trimmed) ─────────────────────────
+	// ── Segment 4: Current user input (never trimmed) ─────────────────────────
 	inputMsg := []ChatMessage{{Role: "user", Content: trunc(input, maxInput)}}
 
 	// ── Context window enforcement ────────────────────────────────────────────
-	// estimateTokens uses len/4 as a fast approximation (1 token ≈ 4 chars).
 	if budget := a.cfg.ContextWindow; budget > 0 {
-		fixed := estimateTokens(systemMsgs) + estimateTokens(staticMsgs) + estimateTokens(inputMsg)
+		fixed := estimateTokens(systemMsgs) + estimateTokens(inputMsg)
 		remaining := budget - fixed
 		// Drop episodic background as a unit if it doesn't fit
 		if estimateTokens(bgMsgs) > remaining {
@@ -435,184 +420,10 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		}
 	}
 
-	// ── Flatten segments ──────────────────────────────────────────────────────
+	// ── Final assembly ────────────────────────────────────────────────────────
 	var msgs []ChatMessage
 	msgs = append(msgs, systemMsgs...)
-	msgs = append(msgs, staticMsgs...)
 	msgs = append(msgs, bgMsgs...)
-	msgs = append(msgs, sessionMsgs...)
-	msgs = append(msgs, inputMsg...)
-	return msgs
-}
-
-// buildMessagesEfficient is a token-efficient version that loads minimal content from Qdrant.
-// Only loads: core persona, user prefs, and skills (summarized).
-// Knowledge and examples are retrieved on-demand via semantic search.
-func (a *Agent) buildMessagesEfficient(ctx context.Context, input string, session, related, identity, userPrefs []*Message) []ChatMessage {
-	loader := NewPromptLoader(a.memory)
-	
-	maxSnip := a.cfg.MaxMessageLen
-	if maxSnip <= 0 {
-		maxSnip = 120
-	}
-	maxInput := a.cfg.MaxInputLen
-	if maxInput <= 0 {
-		maxInput = 400
-	}
-
-	// ── Segment 1: Essential system prompts (from Qdrant, minimal) ────────────
-	var systemMsgs []ChatMessage
-	
-	// Load minimal system prompt from Qdrant (core, user, skills only)
-	minimalPrompts, err := loader.LoadMinimalSystemPrompt(ctx)
-	if err != nil {
-		log.Printf("warn: load minimal prompts: %v", err)
-		// Fallback to basic prompt
-		minimalPrompts = []ChatMessage{{
-			Role:    "system",
-			Content: "You are a helpful assistant.",
-		}}
-	}
-	systemMsgs = append(systemMsgs, minimalPrompts...)
-	
-	// Add current date
-	now := time.Now()
-	dateMsg := fmt.Sprintf("Current date: %s, %d %s %d.", now.Weekday(), now.Day(), now.Month(), now.Year())
-	systemMsgs = append([]ChatMessage{{
-		Role:    "system",
-		Content: dateMsg,
-	}}, systemMsgs...)
-
-	// Add identity info
-	var lang string
-	var identityParts []string
-	for _, m := range identity {
-		for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if k, v, ok := strings.Cut(line, ":"); ok {
-				k = strings.TrimSpace(strings.ToLower(k))
-				v = strings.TrimSpace(v)
-				switch k {
-				case "name":
-					identityParts = append(identityParts, fmt.Sprintf("Your name is %s.", v))
-				case "language":
-					identityParts = append(identityParts, fmt.Sprintf("Always respond in %s.", v))
-					lang = v
-				default:
-					identityParts = append(identityParts, line)
-				}
-			}
-		}
-	}
-	if len(identityParts) > 0 {
-		systemMsgs = append(systemMsgs, ChatMessage{
-			Role:    "system",
-			Content: strings.Join(identityParts, "\n"),
-		})
-	} else if a.cfg.BotName != "" {
-		systemMsgs = append(systemMsgs, ChatMessage{
-			Role:    "system",
-			Content: fmt.Sprintf("Your name is %s.", a.cfg.BotName),
-		})
-	}
-	if lang != "" {
-		systemMsgs = append(systemMsgs, ChatMessage{
-			Role:    "system",
-			Content: fmt.Sprintf("LANGUAGE RULE: You MUST always respond in %s.", lang),
-		})
-	}
-
-	// Add user preferences
-	if len(userPrefs) > 0 {
-		var prefParts []string
-		prefParts = append(prefParts, "User preferences (ALWAYS respect):")
-		for _, m := range userPrefs {
-			for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
-				line = strings.TrimSpace(line)
-				if line != "" {
-					prefParts = append(prefParts, "- "+line)
-				}
-			}
-		}
-		systemMsgs = append(systemMsgs, ChatMessage{
-			Role:    "system",
-			Content: strings.Join(prefParts, "\n"),
-		})
-	}
-
-	// Additional config persona
-	if a.cfg.SystemPrompt != "" {
-		systemMsgs = append(systemMsgs, ChatMessage{
-			Role:    "system",
-			Content: a.cfg.SystemPrompt,
-		})
-	}
-
-	// ── Segment 2: Knowledge on-demand (semantic search) ─────────────────────
-	var knowledgeMsgs []ChatMessage
-	// Only search knowledge if query seems to need it
-	if len(input) > 10 {
-		knowledgeResults, err := loader.SearchKnowledge(ctx, input, 2)
-		if err == nil && len(knowledgeResults) > 0 {
-			knowledgeMsgs = append(knowledgeMsgs, knowledgeResults...)
-		}
-	}
-
-	// ── Segment 3: Session history ────────────────────────────────────────────
-	var sessionMsgs []ChatMessage
-	for _, m := range session {
-		if m.ID == "" {
-			continue
-		}
-		role := m.Role
-		if role == "" {
-			role = "user"
-		}
-		sessionMsgs = append(sessionMsgs, ChatMessage{
-			Role:    role,
-			Content: trunc(m.Text, maxInput),
-		})
-	}
-	log.Printf("[DEBUG] Built %d session messages", len(sessionMsgs))
-
-	// ── Segment 4: Current user input ────────────────────────────────────────
-	inputMsg := []ChatMessage{{Role: "user", Content: trunc(input, maxInput)}}
-
-	// ── Assemble with context window budget ──────────────────────────────────
-	if budget := a.cfg.ContextWindow; budget > 0 {
-		fixed := estimateTokens(systemMsgs) + estimateTokens(inputMsg)
-		remaining := budget - fixed
-		log.Printf("[DEBUG] ContextWindow budget: %d, fixed: %d, remaining: %d", budget, fixed, remaining)
-		
-		// Knowledge messages trimmed first
-		knowledgeBefore := len(knowledgeMsgs)
-		for len(knowledgeMsgs) > 0 && estimateTokens(knowledgeMsgs) > remaining {
-			knowledgeMsgs = knowledgeMsgs[:len(knowledgeMsgs)-1]
-		}
-		if len(knowledgeMsgs) < knowledgeBefore {
-			log.Printf("[DEBUG] Trimmed knowledge: %d -> %d", knowledgeBefore, len(knowledgeMsgs))
-		}
-		remaining -= estimateTokens(knowledgeMsgs)
-		
-		// Then session history (oldest first)
-		sessionBefore := len(sessionMsgs)
-		for len(sessionMsgs) > 0 && estimateTokens(sessionMsgs) > remaining {
-			sessionMsgs = sessionMsgs[1:]
-		}
-		if len(sessionMsgs) < sessionBefore {
-			log.Printf("[DEBUG] Trimmed session: %d -> %d", sessionBefore, len(sessionMsgs))
-		}
-	}
-
-	// ── Final assembly ───────────────────────────────────────────────────────
-	log.Printf("[DEBUG] Final messages: %d system, %d knowledge, %d session, 1 input", 
-		len(systemMsgs), len(knowledgeMsgs), len(sessionMsgs))
-	var msgs []ChatMessage
-	msgs = append(msgs, systemMsgs...)
-	msgs = append(msgs, knowledgeMsgs...)
 	msgs = append(msgs, sessionMsgs...)
 	msgs = append(msgs, inputMsg...)
 	return msgs
