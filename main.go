@@ -164,6 +164,7 @@ func main() {
 	})
 
 	skills.RegisterExecSkill(sys)
+	skills.RegisterConfirmSudoSkill(sys)
 	if mem != nil {
 		skills.RegisterMemorySkills(sys, mem)
 	} else {

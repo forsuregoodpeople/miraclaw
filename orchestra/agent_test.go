@@ -676,6 +676,143 @@ func TestBuildMessagesContextWindowZeroMeansNoLimit(t *testing.T) {
 	}
 }
 
+// TestAgentConfirmSudoPendingAndApprove verifies the two-turn confirm_sudo flow:
+// Turn 1: LLM returns SKILL:confirm_sudo → agent returns confirmation prompt.
+// Turn 2: user replies "yes" → agent runs exec (no LLM call) and returns output.
+func TestAgentConfirmSudoPendingAndApprove(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &multiMockLLM{
+		responses: []string{
+			"SKILL:confirm_sudo:echo approved", // turn 1: LLM triggers confirm
+		},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	skills.RegisterConfirmSudoSkill(sys)
+
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	// Turn 1: trigger confirmation
+	msg1 := orchestra.NewMessage("m1", "run something privileged", "chan-sudo")
+	reply1, err := agent.Reply(context.Background(), msg1)
+	if err != nil {
+		t.Fatalf("Turn 1 Reply error: %v", err)
+	}
+	if !strings.Contains(reply1, "Izinkan") {
+		t.Errorf("expected confirmation prompt, got %q", reply1)
+	}
+	if !strings.Contains(reply1, "echo approved") {
+		t.Errorf("expected command in prompt, got %q", reply1)
+	}
+	callCountAfterTurn1 := llm.callCount
+
+	// Turn 2: approve — LLM must NOT be called again
+	msg2 := orchestra.NewMessage("m2", "yes", "chan-sudo")
+	reply2, err := agent.Reply(context.Background(), msg2)
+	if err != nil {
+		t.Fatalf("Turn 2 Reply error: %v", err)
+	}
+	if !strings.Contains(reply2, "approved") {
+		t.Errorf("expected exec output in reply, got %q", reply2)
+	}
+	if llm.callCount != callCountAfterTurn1 {
+		t.Errorf("expected no additional LLM calls on approval turn, got %d extra", llm.callCount-callCountAfterTurn1)
+	}
+}
+
+// TestAgentConfirmSudoRejected verifies that "tidak" aborts without running exec.
+func TestAgentConfirmSudoRejected(t *testing.T) {
+	mem := &fakeMemory{}
+	var execCalled bool
+	llm := &multiMockLLM{
+		responses: []string{"SKILL:confirm_sudo:rm important_file"},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	sys.Register("exec", "exec", func(_ context.Context, _ string) (string, error) {
+		execCalled = true
+		return "deleted", nil
+	})
+	skills.RegisterConfirmSudoSkill(sys)
+
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg1 := orchestra.NewMessage("m1", "delete it", "chan-reject")
+	_, _ = agent.Reply(context.Background(), msg1)
+
+	msg2 := orchestra.NewMessage("m2", "tidak", "chan-reject")
+	reply2, err := agent.Reply(context.Background(), msg2)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if !strings.Contains(reply2, "dibatalkan") {
+		t.Errorf("expected abort message, got %q", reply2)
+	}
+	if execCalled {
+		t.Error("exec must NOT be called when user rejects")
+	}
+}
+
+// TestAgentConfirmSudoInvalidAnswer verifies that a non-yes/no answer aborts.
+func TestAgentConfirmSudoInvalidAnswer(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &multiMockLLM{
+		responses: []string{"SKILL:confirm_sudo:sudo reboot"},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	skills.RegisterConfirmSudoSkill(sys)
+
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	msg1 := orchestra.NewMessage("m1", "reboot server", "chan-invalid")
+	_, _ = agent.Reply(context.Background(), msg1)
+
+	msg2 := orchestra.NewMessage("m2", "maybe later", "chan-invalid")
+	reply2, err := agent.Reply(context.Background(), msg2)
+	if err != nil {
+		t.Fatalf("Turn 2 error: %v", err)
+	}
+	if !strings.Contains(reply2, "dibatalkan") {
+		t.Errorf("expected abort message for invalid answer, got %q", reply2)
+	}
+}
+
+// TestAgentConfirmSudoConcurrentChannels verifies that pending confirms for
+// different channelIDs are independent.
+func TestAgentConfirmSudoConcurrentChannels(t *testing.T) {
+	mem := &fakeMemory{}
+	llm := &multiMockLLM{
+		responses: []string{
+			"SKILL:confirm_sudo:echo chan-a",
+			"SKILL:confirm_sudo:echo chan-b",
+		},
+	}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	skills.RegisterConfirmSudoSkill(sys)
+
+	agent := orchestra.NewAgent(mem, llm, sys, orchestra.AgentConfig{MaxOutputTokens: 100})
+
+	// Set up pending confirms for two separate channels
+	_, _ = agent.Reply(context.Background(), orchestra.NewMessage("m1", "run A", "chan-a"))
+	_, _ = agent.Reply(context.Background(), orchestra.NewMessage("m2", "run B", "chan-b"))
+
+	// Approve chan-a
+	replyA, err := agent.Reply(context.Background(), orchestra.NewMessage("m3", "yes", "chan-a"))
+	if err != nil {
+		t.Fatalf("chan-a approval error: %v", err)
+	}
+	if !strings.Contains(replyA, "chan-a") {
+		t.Errorf("expected chan-a exec output, got %q", replyA)
+	}
+
+	// Reject chan-b
+	replyB, err := agent.Reply(context.Background(), orchestra.NewMessage("m4", "tidak", "chan-b"))
+	if err != nil {
+		t.Fatalf("chan-b rejection error: %v", err)
+	}
+	if !strings.Contains(replyB, "dibatalkan") {
+		t.Errorf("expected abort for chan-b, got %q", replyB)
+	}
+}
+
 // TestAgentBackgroundRememberDoesNotReplaceReply verifies that a plain reply
 // (no SKILL) is returned unchanged.
 func TestAgentBackgroundRememberDoesNotReplaceReply(t *testing.T) {

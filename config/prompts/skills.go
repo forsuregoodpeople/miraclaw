@@ -21,8 +21,11 @@ const SkillRuleSetIdentity = `(4) set_identity: User wants to change your name/l
 // SkillRuleCreateSchedule defines the create_schedule skill.
 const SkillRuleCreateSchedule = `(5) create_schedule: SKILL:create_schedule:<5-field-cron>|||<reminder text> — ||| separator REQUIRED.`
 
+// SkillRuleConfirmSudo defines the confirm_sudo skill rule.
+const SkillRuleConfirmSudo = `(6) confirm_sudo: BEFORE running any sudo/privileged command → use SKILL:confirm_sudo:<command>. NEVER use exec directly for sudo or root-level commands.`
+
 // SkillRuleNeverRefuse defines the general rule.
-const SkillRuleNeverRefuse = `(6) NEVER refuse to use a skill when it matches what the user wants.`
+const SkillRuleNeverRefuse = `(7) NEVER refuse to use a skill when it matches what the user wants.`
 
 // MemorySkillExamples provides concrete examples.
 const MemorySkillExamples = `    Examples: User says 'panggil aku bos' → reply naturally then add line: SKILL:remember:user wants to be called bos

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miraclaw/config/prompts"
@@ -40,26 +41,65 @@ type AgentConfig struct {
 }
 
 type Agent struct {
-	memory  AgentMemory
-	llm     LLM
-	system  *System
-	cfg     AgentConfig
-	scanner func(string) error
+	memory         AgentMemory
+	llm            LLM
+	system         *System
+	cfg            AgentConfig
+	scanner        func(string) error
+	pendingConfirm map[string]string // channelID → command awaiting user confirmation
+	pendingMu      sync.Mutex
 }
 
 func NewAgent(memory AgentMemory, llm LLM, system *System, cfg AgentConfig) *Agent {
 	return &Agent{
-		memory:  memory,
-		llm:     llm,
-		system:  system,
-		cfg:     cfg,
-		scanner: cfg.TextScanner,
+		memory:         memory,
+		llm:            llm,
+		system:         system,
+		cfg:            cfg,
+		scanner:        cfg.TextScanner,
+		pendingConfirm: make(map[string]string),
+	}
+}
+
+// handlePendingConfirm checks if there is a pending sudo confirmation for this
+// channel. If so, it interprets the message text as a yes/no answer, runs or
+// aborts the command, and returns (reply, true). Otherwise returns ("", false).
+func (a *Agent) handlePendingConfirm(ctx context.Context, msg *Message) (string, bool) {
+	a.pendingMu.Lock()
+	cmd, ok := a.pendingConfirm[msg.ChannelID]
+	if ok {
+		delete(a.pendingConfirm, msg.ChannelID)
+	}
+	a.pendingMu.Unlock()
+
+	if !ok {
+		return "", false
+	}
+
+	switch strings.ToLower(strings.TrimSpace(msg.Text)) {
+	case "yes", "y", "iya", "ok", "boleh":
+		result, err := a.system.Exec(ctx, cmd)
+		if err != nil {
+			return fmt.Sprintf("Gagal menjalankan perintah: %v", err), true
+		}
+		return "```\n" + result + "\n```", true
+	case "no", "tidak", "cancel", "batal":
+		return "Perintah dibatalkan.", true
+	default:
+		return "Konfirmasi tidak valid. Perintah dibatalkan.", true
 	}
 }
 
 func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 	if a.llm == nil {
 		return "", fmt.Errorf("no LLM provider configured")
+	}
+
+	// 0. Check for pending sudo confirmation — bypasses full LLM pipeline.
+	if reply, handled := a.handlePendingConfirm(ctx, msg); handled {
+		_ = a.memory.Add(ctx, msg, "user")
+		_ = a.memory.AddBotReply(ctx, msg.ChannelID, reply)
+		return reply, nil
 	}
 
 	// 1. Store user message to Qdrant
@@ -133,6 +173,13 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		result, skillErr := a.system.Run(ctx, name, input)
 		if skillErr != nil {
 			resp = fmt.Sprintf("skill %s error: %v", name, skillErr)
+		} else if skillErr == nil && strings.HasPrefix(result, ConfirmPendingPrefix) {
+			// confirm_sudo: store pending command and return confirmation prompt.
+			cmd := strings.TrimPrefix(result, ConfirmPendingPrefix)
+			a.pendingMu.Lock()
+			a.pendingConfirm[msg.ChannelID] = cmd
+			a.pendingMu.Unlock()
+			resp = fmt.Sprintf("⚠️ Perintah ini membutuhkan akses elevated:\n`%s`\nIzinkan? (yes/no)", cmd)
 		} else if rawOutputSkills[name] {
 			// Raw skills: always show code block + LLM explanation separately.
 			botName, lang := extractIdentityFields(identity)
@@ -299,6 +346,8 @@ func (a *Agent) buildMessages(input string, session, related, static, identity, 
 		}
 		sysContent.WriteByte('\n')
 		sysContent.WriteString(prompts.SkillRuleExec)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleConfirmSudo)
 		sysContent.WriteByte('\n')
 		sysContent.WriteString(prompts.SkillRuleMemory)
 		sysContent.WriteByte('\n')
