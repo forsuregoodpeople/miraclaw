@@ -150,6 +150,10 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("user preferences fetch: %w", err)
 	}
+	log.Printf("[DEBUG] User preferences from category='user': %d items", len(userPrefs))
+	for i, p := range userPrefs {
+		log.Printf("[DEBUG] User pref [%d]: %s", i, trunc(p.Text, 50))
+	}
 
 	// 5. Build role-based messages (token-efficient: only essential prompts)
 	messages := a.buildMessagesEfficient(ctx, msg.Text, session, related, identity, userPrefs)
@@ -328,12 +332,18 @@ func (a *Agent) buildMessagesEfficient(_ context.Context, input string, session,
 				}
 			}
 		}
+		log.Printf("[DEBUG] Added %d user prefs to system prompt", len(userPrefs))
+	} else {
+		log.Printf("[DEBUG] No user preferences found - bot will not know user's identity")
 	}
 
 	// Additional persona from config (optional)
 	if a.cfg.SystemPrompt != "" {
 		sysContent.WriteString(a.cfg.SystemPrompt)
 		sysContent.WriteByte('\n')
+		log.Printf("[DEBUG] Added custom system_prompt from config (%d chars)", len(a.cfg.SystemPrompt))
+	} else {
+		log.Printf("[DEBUG] No custom system_prompt in config")
 	}
 
 	// Skills list — always injected so LLM knows SKILL:name:input format
