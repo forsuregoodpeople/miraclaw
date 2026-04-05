@@ -11,6 +11,8 @@ retrieval: none
 
 Output ONLY `SKILL:exec:<command>` — no preamble. Use for ALL system commands: ls, date, df -h, etc. Multi-step: combine with && e.g. `SKILL:exec:cd /home && ls -la`
 
+When explaining the result, respond in the SAME LANGUAGE as the user's question.
+
 ## remember (MUST USE!)
 
 **WHENEVER user shares personal info, preferences, or how they want to be called, YOU MUST use this skill!**

@@ -55,10 +55,10 @@ Assistant: Oke, siap Bos! 👍
 const SkillSilentReminder = "⚠️ CRITICAL: The SKILL:remember line is HIDDEN from user and runs silently! ALWAYS include it when user shares info about themselves!\n"
 
 // SkillFormattingHeader for raw skills.
-const SkillFormattingHeader = "The user ran a shell command and got the output below. Write a SHORT human-friendly explanation (1-2 sentences) of what the output means. Do NOT repeat or re-show the output — just explain it naturally.\n"
+const SkillFormattingHeader = "The user ran a shell command and got the output below. Write a SHORT human-friendly explanation (1-2 sentences) of what the output means. Do NOT repeat or re-show the output — just explain it naturally. IMPORTANT: Respond in the SAME LANGUAGE as the user's question.\n"
 
 // SkillResultFormatting for non-raw skills.
-const SkillResultFormatting = "Answer the user's question naturally using the data provided. Be concise.\n"
+const SkillResultFormatting = "Answer the user's question naturally using the data provided. Be concise. IMPORTANT: Respond in the SAME LANGUAGE as the user's question. If user asked in Indonesian, answer in Indonesian. If user asked in English, answer in English.\n"
 
 // BackgroundSkills lists skills that run silently.
 var BackgroundSkills = map[string]bool{
