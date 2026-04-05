@@ -6,6 +6,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/miraclaw/config/prompts"
 )
 
 type AgentMemory interface {
@@ -68,6 +70,9 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		}
 	}
 
+	// 2b. Auto-extract preferences from user message (backup if LLM doesn't call skill)
+	go a.autoExtractPreference(ctx, msg)
+
 	// 3. Query Qdrant: session messages (short-term)
 	maxTurns := a.cfg.MaxHistoryTurns
 	if maxTurns <= 0 {
@@ -88,24 +93,20 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 		return "", fmt.Errorf("memory search: %w", err)
 	}
 
-	// 4b. Query static knowledge base — higher topN than episodic (prioritized)
-	staticCtx := maxCtx * 2
-	if staticCtx < 4 {
-		staticCtx = 4
-	}
-	static, err := a.memory.SearchStatic(ctx, "", msg.Text, uint64(staticCtx))
-	if err != nil {
-		return "", fmt.Errorf("static knowledge fetch: %w", err)
-	}
-
 	// 4c. Fetch identity — guaranteed retrieval by category, no vector search
 	identity, err := a.memory.GetStaticByCategory(ctx, IdentityCategory)
 	if err != nil {
 		return "", fmt.Errorf("identity fetch: %w", err)
 	}
 
-	// 5. Build role-based messages and call LLM
-	messages := a.buildMessages(msg.Text, session, related, static, identity)
+	// 4d. Fetch user preferences — guaranteed retrieval by category, no vector search
+	userPrefs, err := a.memory.GetStaticByCategory(ctx, "user")
+	if err != nil {
+		return "", fmt.Errorf("user preferences fetch: %w", err)
+	}
+
+	// 5. Build role-based messages (token-efficient: only essential prompts)
+	messages := a.buildMessagesEfficient(ctx, msg.Text, session, related, identity, userPrefs)
 	maxOut := a.cfg.MaxOutputTokens
 	if maxOut <= 0 {
 		maxOut = 1024
@@ -134,12 +135,12 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 				botName = a.cfg.BotName
 			}
 			var skillSys strings.Builder
-			skillSys.WriteString("The user ran a shell command and got the output below. Write a SHORT human-friendly explanation (1-2 sentences) of what the output means. Do NOT repeat or re-show the output — just explain it naturally.\n")
+			skillSys.WriteString(prompts.SkillFormattingHeader)
 			if botName != "" {
-				fmt.Fprintf(&skillSys, "Your name is %s.\n", botName)
+				fmt.Fprintf(&skillSys, prompts.IdentityNameTemplate, botName)
 			}
 			if lang != "" {
-				fmt.Fprintf(&skillSys, "LANGUAGE RULE: You MUST always respond in %s.\n", lang)
+				fmt.Fprintf(&skillSys, prompts.LanguageRuleTemplate, lang)
 			}
 			userQuestion := messages[len(messages)-1].Content
 			explanation, fmtErr := a.llm.Complete(ctx, Request{
@@ -166,12 +167,12 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 				botName = a.cfg.BotName
 			}
 			var skillSys strings.Builder
-			skillSys.WriteString("Answer the user's question naturally using the data provided. Be concise.\n")
+			skillSys.WriteString(prompts.SkillResultFormatting)
 			if botName != "" {
-				fmt.Fprintf(&skillSys, "Your name is %s.\n", botName)
+				fmt.Fprintf(&skillSys, prompts.IdentityNameTemplate, botName)
 			}
 			if lang != "" {
-				fmt.Fprintf(&skillSys, "LANGUAGE RULE: You MUST always respond in %s, regardless of what language the user writes in.\n", lang)
+				fmt.Fprintf(&skillSys, prompts.LanguageRuleTemplate, lang)
 			}
 			userQuestion := messages[len(messages)-1].Content
 			formatted, fmtErr := a.llm.Complete(ctx, Request{
@@ -201,9 +202,9 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 }
 
 // buildMessages assembles the []ChatMessage to send to the LLM.
-// Order: system prompt → identity → skills → static knowledge → episodik background → session history → current user input.
+// Order: system prompt → identity → user prefs → skills → static knowledge → episodik background → session history → current user input.
 // If ContextWindow > 0, lower-priority segments (episodic background, then oldest session turns) are trimmed to stay within budget.
-func (a *Agent) buildMessages(input string, session, related, static, identity []*Message) []ChatMessage {
+func (a *Agent) buildMessages(input string, session, related, static, identity, userPrefs []*Message) []ChatMessage {
 	maxSnip := a.cfg.MaxMessageLen
 	if maxSnip <= 0 {
 		maxSnip = 120
@@ -223,14 +224,12 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 	// Persona prompt — aspiration-based, unlocks full LLM potential
 	now := time.Now()
 	fmt.Fprintf(&sysContent, "Current date: %s, %d %s %d.\n", now.Weekday(), now.Day(), now.Month(), now.Year())
-	sysContent.WriteString("You are a casual, warm friend — not an AI assistant. Talk naturally like a person texting.\n")
-	sysContent.WriteString("- Answer directly. Just say what's needed, then stop.\n")
-	sysContent.WriteString("- NEVER end with a question ('Ada yang mau dibahas?', 'Ada lagi?', etc.) unless the user explicitly asked something open-ended.\n")
-	sysContent.WriteString("- Be personal: read the emotional tone, respond with empathy.\n")
-	sysContent.WriteString("- Use humor or emojis when it fits, but keep it natural — don't force it.\n")
-	sysContent.WriteString("BUBBLE FORMAT (mandatory): Each response MUST be split dynamic. Separate every idea, sentence, or thought with a blank line (\\n\\n). Never write more than 1-2 sentences per bubble. Think of each bubble as a separate chat message sent one by one. Expand your response naturally — add reactions, follow-up thoughts, emojis — to reach at least 4 bubbles.\n")
-	sysContent.WriteString("Example — CORRECT (4 bubbles):\nHalo! 😊\n\nWah, siang-siang udah muncul nih.\n\nGimana harimu sejauh ini?\n\nSemoga lancar ya!\n\nExample — WRONG (1 bubble):\nHalo! 😊 Wah siang-siang udah muncul. Gimana harimu? Semoga lancar!\n")
-	sysContent.WriteString("- NEVER echo the user's message. NEVER reply with just 'ok', 'hmm', or a single word.\n")
+	sysContent.WriteString(prompts.CorePersona)
+	sysContent.WriteByte('\n')
+	sysContent.WriteString(prompts.BubbleFormat)
+	sysContent.WriteByte('\n')
+	sysContent.WriteString(prompts.ResponseConstraints)
+	sysContent.WriteByte('\n')
 
 	// Identity — fetched from Qdrant static category="identity", guaranteed retrieval.
 	// Storage format is "key: value" (e.g. "name: Sara", "language: Indonesian").
@@ -248,9 +247,9 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 					v = strings.TrimSpace(v)
 					switch k {
 					case "name":
-						fmt.Fprintf(&sysContent, "- Your name is %s.\n", v)
+						fmt.Fprintf(&sysContent, prompts.IdentityNameTemplate, v)
 					case "language":
-						fmt.Fprintf(&sysContent, "- Always respond in %s.\n", v)
+						fmt.Fprintf(&sysContent, prompts.IdentityLanguageTemplate, v)
 						lang = v
 					default:
 						sysContent.WriteString("- " + line + "\n")
@@ -261,11 +260,24 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 			}
 		}
 	} else if a.cfg.BotName != "" {
-		fmt.Fprintf(&sysContent, "- Your name is %s.\n", a.cfg.BotName)
+		fmt.Fprintf(&sysContent, prompts.IdentityNameTemplate, a.cfg.BotName)
 	}
 	// Language directive — explicit top-level rule so LLM cannot ignore it
 	if lang != "" {
-		fmt.Fprintf(&sysContent, "LANGUAGE RULE: You MUST always respond in %s, regardless of what language the user writes in.\n", lang)
+		fmt.Fprintf(&sysContent, prompts.LanguageRuleTemplate, lang)
+	}
+
+	// User preferences — guaranteed retrieval from static category="user"
+	if len(userPrefs) > 0 {
+		sysContent.WriteString(prompts.UserPrefsHeader)
+		for _, m := range userPrefs {
+			for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					sysContent.WriteString("- " + line + "\n")
+				}
+			}
+		}
 	}
 
 	// Additional persona from config (optional)
@@ -276,11 +288,29 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 
 	// Skills list — always injected
 	if skills := a.system.SkillList(); len(skills) > 0 {
-		sysContent.WriteString("You have skills. Available skills:")
+		sysContent.WriteString(prompts.SkillRulesHeader)
 		for name, desc := range skills {
 			fmt.Fprintf(&sysContent, " %s(%s)", name, trunc(desc, maxDesc))
 		}
-		sysContent.WriteString("\nSKILL RULES: (1) For exec: output ONLY SKILL:exec:<command> — no preamble. exec runs via sh -c so builtins (cd), pipes (|), chaining (&&) all work. Use it for EVERYTHING system-related: ls, df -h, date, free -h, cat /etc/hostname, ps aux, systemctl status, uname -a, etc. Multi-step: combine with && e.g. SKILL:exec:cd /home && ls -la. Never split into multiple SKILL:exec calls. (2) For memory skills (remember, set_identity): add on its own line anywhere in reply — runs silently. (3) User shares personal info/preference → add SKILL:remember:<fact> line. (4) User asks about your identity → SKILL:get_identity:. (5) User wants to change name/language → SKILL:set_identity:<field>:<value> line. (6) Never refuse a matching skill. (7) For create_schedule: SKILL:create_schedule:<5-field-cron>|||<reminder text> — the ||| separator is REQUIRED.\n")
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleExec)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleMemory)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.MemorySkillExamples)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleGetIdentity)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleSetIdentity)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleCreateSchedule)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillRuleNeverRefuse)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.FewShotHeader)
+		sysContent.WriteString(prompts.FewShotExamples)
+		sysContent.WriteByte('\n')
+		sysContent.WriteString(prompts.SkillSilentReminder)
 	}
 
 	// ── Segment 1: System prompt / persona (never trimmed) ───────────────────
@@ -361,6 +391,167 @@ func (a *Agent) buildMessages(input string, session, related, static, identity [
 	return msgs
 }
 
+// buildMessagesEfficient is a token-efficient version that loads minimal content from Qdrant.
+// Only loads: core persona, user prefs, and skills (summarized).
+// Knowledge and examples are retrieved on-demand via semantic search.
+func (a *Agent) buildMessagesEfficient(ctx context.Context, input string, session, related, identity, userPrefs []*Message) []ChatMessage {
+	loader := NewPromptLoader(a.memory)
+	
+	maxSnip := a.cfg.MaxMessageLen
+	if maxSnip <= 0 {
+		maxSnip = 120
+	}
+	maxInput := a.cfg.MaxInputLen
+	if maxInput <= 0 {
+		maxInput = 400
+	}
+
+	// ── Segment 1: Essential system prompts (from Qdrant, minimal) ────────────
+	var systemMsgs []ChatMessage
+	
+	// Load minimal system prompt from Qdrant (core, user, skills only)
+	minimalPrompts, err := loader.LoadMinimalSystemPrompt(ctx)
+	if err != nil {
+		log.Printf("warn: load minimal prompts: %v", err)
+		// Fallback to basic prompt
+		minimalPrompts = []ChatMessage{{
+			Role:    "system",
+			Content: "You are a helpful assistant.",
+		}}
+	}
+	systemMsgs = append(systemMsgs, minimalPrompts...)
+	
+	// Add current date
+	now := time.Now()
+	dateMsg := fmt.Sprintf("Current date: %s, %d %s %d.", now.Weekday(), now.Day(), now.Month(), now.Year())
+	systemMsgs = append([]ChatMessage{{
+		Role:    "system",
+		Content: dateMsg,
+	}}, systemMsgs...)
+
+	// Add identity info
+	var lang string
+	var identityParts []string
+	for _, m := range identity {
+		for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if k, v, ok := strings.Cut(line, ":"); ok {
+				k = strings.TrimSpace(strings.ToLower(k))
+				v = strings.TrimSpace(v)
+				switch k {
+				case "name":
+					identityParts = append(identityParts, fmt.Sprintf("Your name is %s.", v))
+				case "language":
+					identityParts = append(identityParts, fmt.Sprintf("Always respond in %s.", v))
+					lang = v
+				default:
+					identityParts = append(identityParts, line)
+				}
+			}
+		}
+	}
+	if len(identityParts) > 0 {
+		systemMsgs = append(systemMsgs, ChatMessage{
+			Role:    "system",
+			Content: strings.Join(identityParts, "\n"),
+		})
+	} else if a.cfg.BotName != "" {
+		systemMsgs = append(systemMsgs, ChatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("Your name is %s.", a.cfg.BotName),
+		})
+	}
+	if lang != "" {
+		systemMsgs = append(systemMsgs, ChatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("LANGUAGE RULE: You MUST always respond in %s.", lang),
+		})
+	}
+
+	// Add user preferences
+	if len(userPrefs) > 0 {
+		var prefParts []string
+		prefParts = append(prefParts, "User preferences (ALWAYS respect):")
+		for _, m := range userPrefs {
+			for _, line := range strings.Split(strings.TrimSpace(m.Text), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					prefParts = append(prefParts, "- "+line)
+				}
+			}
+		}
+		systemMsgs = append(systemMsgs, ChatMessage{
+			Role:    "system",
+			Content: strings.Join(prefParts, "\n"),
+		})
+	}
+
+	// Additional config persona
+	if a.cfg.SystemPrompt != "" {
+		systemMsgs = append(systemMsgs, ChatMessage{
+			Role:    "system",
+			Content: a.cfg.SystemPrompt,
+		})
+	}
+
+	// ── Segment 2: Knowledge on-demand (semantic search) ─────────────────────
+	var knowledgeMsgs []ChatMessage
+	// Only search knowledge if query seems to need it
+	if len(input) > 10 {
+		knowledgeResults, err := loader.SearchKnowledge(ctx, input, 2)
+		if err == nil && len(knowledgeResults) > 0 {
+			knowledgeMsgs = append(knowledgeMsgs, knowledgeResults...)
+		}
+	}
+
+	// ── Segment 3: Session history ────────────────────────────────────────────
+	var sessionMsgs []ChatMessage
+	for _, m := range session {
+		if m.ID == "" {
+			continue
+		}
+		role := m.Role
+		if role == "" {
+			role = "user"
+		}
+		sessionMsgs = append(sessionMsgs, ChatMessage{
+			Role:    role,
+			Content: trunc(m.Text, maxInput),
+		})
+	}
+
+	// ── Segment 4: Current user input ────────────────────────────────────────
+	inputMsg := []ChatMessage{{Role: "user", Content: trunc(input, maxInput)}}
+
+	// ── Assemble with context window budget ──────────────────────────────────
+	if budget := a.cfg.ContextWindow; budget > 0 {
+		fixed := estimateTokens(systemMsgs) + estimateTokens(inputMsg)
+		remaining := budget - fixed
+		
+		// Knowledge messages trimmed first
+		for len(knowledgeMsgs) > 0 && estimateTokens(knowledgeMsgs) > remaining {
+			knowledgeMsgs = knowledgeMsgs[:len(knowledgeMsgs)-1]
+		}
+		remaining -= estimateTokens(knowledgeMsgs)
+		
+		// Then session history (oldest first)
+		for len(sessionMsgs) > 0 && estimateTokens(sessionMsgs) > remaining {
+			sessionMsgs = sessionMsgs[1:]
+		}
+	}
+
+	// ── Final assembly ───────────────────────────────────────────────────────
+	var msgs []ChatMessage
+	msgs = append(msgs, systemMsgs...)
+	msgs = append(msgs, knowledgeMsgs...)
+	msgs = append(msgs, sessionMsgs...)
+	msgs = append(msgs, inputMsg...)
+	return msgs
+}
+
 func (a *Agent) System() *System {
 	return a.system
 }
@@ -383,17 +574,11 @@ func trunc(s string, max int) string {
 
 // backgroundSkills are skill names that run silently as side-effects and do not
 // replace the reply — they are stripped from the LLM output after execution.
-var backgroundSkills = map[string]bool{
-	"remember":     true,
-	"set_identity": true,
-}
+var backgroundSkills = prompts.BackgroundSkills
 
 // rawOutputSkills are skills whose output should be shown verbatim as a code block,
 // skipping the second LLM formatting call.
-var rawOutputSkills = map[string]bool{
-	"exec":         true,
-	"query_memory": true,
-}
+var rawOutputSkills = prompts.RawOutputSkills
 
 // runBackgroundSkills scans resp for SKILL:name:input lines belonging to
 // backgroundSkills, executes them silently, and returns resp with those lines removed.
@@ -458,4 +643,31 @@ func parseSkillCall(resp string) (name, input string, ok bool) {
 		input = input[:nl]
 	}
 	return n, strings.TrimSpace(input), true
+}
+
+// autoExtractPreference extracts common preference patterns from user message
+// and auto-saves them to memory as a backup when LLM doesn't call SKILL:remember.
+// This runs in background to not block the main flow.
+func (a *Agent) autoExtractPreference(ctx context.Context, msg *Message) {
+	text := strings.ToLower(strings.TrimSpace(msg.Text))
+	if text == "" {
+		return
+	}
+
+	for _, p := range prompts.AutoExtractPatterns {
+		for _, prefix := range p.Prefixes {
+			if strings.HasPrefix(text, prefix) {
+				value := strings.TrimSpace(msg.Text[len(prefix):])
+				if value != "" {
+					// Save to memory
+					fact := fmt.Sprintf("%s %s", p.Label, value)
+					id := fmt.Sprintf("%s%d", prompts.AutoExtractIDPrefix, time.Now().UnixNano())
+					if err := a.memory.AddStatic(ctx, id, fact, prompts.AutoExtractCategory); err == nil {
+						log.Printf("[AutoExtract] Saved preference: %s", fact)
+					}
+					return // Only extract one preference per message
+				}
+			}
+		}
+	}
 }

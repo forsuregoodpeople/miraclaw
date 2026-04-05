@@ -90,9 +90,26 @@ func main() {
 		log.Fatalf("qdrant: %v", err)
 	}
 
-	// Seed built-in knowledge and identity into Qdrant static (idempotent)
-	orchestra.SeedKnowledge(ctx, mem)
+	// Bootstrap: Load markdown files from workspace into Qdrant (token-efficient)
+	bootstrap := orchestra.NewBootstrap(mem, "./workspace")
+	bootstrapResult, err := bootstrap.Run(ctx)
+	if err != nil {
+		log.Printf("warn: bootstrap failed: %v", err)
+	} else if bootstrapResult.AlreadyBootstrapped {
+		if bootstrapResult.HashMatch {
+			log.Printf("Bootstrap: up to date (%d sections)", bootstrapResult.SectionsStored)
+		} else {
+			log.Printf("Bootstrap: updated (%d files, %d sections)", 
+				bootstrapResult.FilesProcessed, bootstrapResult.SectionsStored)
+		}
+	} else {
+		log.Printf("Bootstrap: loaded %d files, %d sections", 
+			bootstrapResult.FilesProcessed, bootstrapResult.SectionsStored)
+	}
+
+	// Seed identity if not exists
 	orchestra.SeedIdentity(ctx, mem, cfg.Agent.BotName)
+	
 	// Load optional user-provided knowledge file
 	if cfg.Agent.AgentMD != "" {
 		if err := orchestra.LoadKnowledgeFile(ctx, cfg.Agent.AgentMD, mem); err != nil {

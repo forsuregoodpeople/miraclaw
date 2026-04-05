@@ -8,49 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/miraclaw/config/prompts"
 )
 
-// IdentityCategory is the Qdrant static category for bot identity fields
-// (name, language, persona). Always fetched by exact match, never by vector search.
-const IdentityCategory = "identity"
-
-// builtinKnowledge are the default knowledge sections seeded into Qdrant static
-// on every startup (idempotent via stable IDs). No external file needed.
-var builtinKnowledge = []struct{ heading, body string }{
-	{
-		heading: "Skill Usage",
-		body: `When the user asks you to perform an action that matches a skill, reply EXACTLY with:
-SKILL:<skill-name>:<input>
-
-Do not use native tool use. SKILL:name:input is the only dispatch format.
-When user asks to remember or save information → always call SKILL:remember:<text>.`,
-	},
-	{
-		heading: "Memory",
-		body: `SKILL:remember and SKILL:set_identity are background skills — add them on their own line in your reply and they run silently without replacing your reply.
-Use SKILL:remember:<text> whenever the user shares: their name, preferences, facts about themselves, things they like/dislike, where they live/work, contact info, or explicitly asks you to remember something.
-Use SKILL:clear_memory to wipe all memory when asked.
-Example reply when user says "saya suka kopi hitam":
-Noted!
-
-SKILL:remember:user suka kopi hitam`,
-	},
-	{
-		heading: "Scheduling",
-		body: `To create a recurring scheduled reminder use SKILL:create_schedule:<cron>|||<prompt>
-Cron format is EXACTLY 5 space-separated fields: MINUTE HOUR * * WEEKDAY
-WEEKDAY: * = every day, 1-5 = Mon-Fri, 1 = Monday, 0 or 7 = Sunday
-Examples:
-  Every day 9 AM:    SKILL:create_schedule:0 9 * * *|||Good morning!
-  Weekdays 9 AM:     SKILL:create_schedule:0 9 * * 1-5|||Selamat pagi!
-  Daily 10 PM:       SKILL:create_schedule:0 22 * * *|||Evening check-in
-  Every Mon 8 AM:    SKILL:create_schedule:0 8 * * 1|||Weekly planning
-  Every day 7:30 AM: SKILL:create_schedule:30 7 * * *|||Reminder
-User says "ingatkan aku jam 9 pagi" → SKILL:create_schedule:0 9 * * *|||<teks reminder>
-User says "remind me at 3 PM daily" → SKILL:create_schedule:0 15 * * *|||<reminder text>
-IMPORTANT: the cron field must be 5 fields separated by spaces, NOT "HH:MM" format.`,
-	},
-}
+// IdentityCategory is re-exported from prompts for backward compatibility.
+const IdentityCategory = prompts.IdentityCategory
 
 // KnowledgeSeeder is the subset of AgentMemory needed for seeding static knowledge.
 type KnowledgeSeeder interface {
@@ -98,18 +61,18 @@ func UpdateIdentity(ctx context.Context, mem KnowledgeSeeder, fieldValue string)
 	}
 	var lines []string
 	if n, ok2 := fields["name"]; ok2 {
-		lines = append(lines, "name: "+n)
+		lines = append(lines, fmt.Sprintf(prompts.IdentityNameFormat, n))
 	}
 	if l, ok2 := fields["language"]; ok2 {
-		lines = append(lines, "language: "+l)
+		lines = append(lines, fmt.Sprintf(prompts.IdentityLanguageFormat, l))
 	}
 	for k, v := range fields {
 		if k != "name" && k != "language" {
 			lines = append(lines, k+": "+v)
 		}
 	}
-	text := strings.Join(lines, "\n")
-	if err := mem.AddStatic(ctx, IdentityID, text, IdentityCategory); err != nil {
+	text := strings.Join(lines, prompts.IdentityLineSeparator)
+	if err := mem.AddStatic(ctx, prompts.IdentityID, text, IdentityCategory); err != nil {
 		return "", fmt.Errorf("identity: save: %w", err)
 	}
 	return field + " = " + value, nil
@@ -130,8 +93,8 @@ func SeedIdentity(ctx context.Context, mem KnowledgeSeeder, botName string) {
 		log.Printf("knowledge: identity already set, skipping seed")
 		return
 	}
-	text := "name: " + botName
-	if err := mem.AddStatic(ctx, IdentityID, text, IdentityCategory); err != nil {
+	text := fmt.Sprintf(prompts.IdentityNameFormat, botName)
+	if err := mem.AddStatic(ctx, prompts.IdentityID, text, IdentityCategory); err != nil {
 		log.Printf("warn: knowledge: seed identity: %v", err)
 		return
 	}
@@ -141,14 +104,14 @@ func SeedIdentity(ctx context.Context, mem KnowledgeSeeder, botName string) {
 // SeedKnowledge upserts the built-in knowledge sections into Qdrant static.
 // Safe to call on every startup — uses stable IDs so it is fully idempotent.
 func SeedKnowledge(ctx context.Context, mem KnowledgeSeeder) {
-	for _, s := range builtinKnowledge {
-		id := knowledgeID(s.heading)
-		content := s.heading + "\n" + s.body
-		if err := mem.AddStatic(ctx, id, content, "knowledge"); err != nil {
-			log.Printf("warn: knowledge: seed %q: %v", s.heading, err)
+	for _, s := range prompts.BuiltinKnowledge {
+		id := knowledgeID(s.Heading)
+		content := s.Heading + "\n" + s.Body
+		if err := mem.AddStatic(ctx, id, content, prompts.KnowledgeCategory); err != nil {
+			log.Printf("warn: knowledge: seed %q: %v", s.Heading, err)
 		}
 	}
-	log.Printf("knowledge: seeded %d sections", len(builtinKnowledge))
+	log.Printf("knowledge: seeded %d sections", len(prompts.BuiltinKnowledge))
 }
 
 // LoadKnowledgeFile reads a text file at path, splits it into sections by "## "
@@ -165,7 +128,7 @@ func LoadKnowledgeFile(ctx context.Context, path string, mem KnowledgeSeeder) er
 	sections := splitSections(string(data))
 	for _, s := range sections {
 		id := knowledgeID(s.heading)
-		if err := mem.AddStatic(ctx, id, s.content, "knowledge"); err != nil {
+		if err := mem.AddStatic(ctx, id, s.content, prompts.KnowledgeCategory); err != nil {
 			log.Printf("warn: knowledge: upsert %q: %v", s.heading, err)
 		}
 	}
@@ -216,7 +179,7 @@ func splitSections(text string) []knowledgeSection {
 func knowledgeID(heading string) string {
 	h := fnv.New32a()
 	h.Write([]byte(heading))
-	return fmt.Sprintf("knowledge-%08x", h.Sum32())
+	return fmt.Sprintf("%s%08x", prompts.KnowledgeIDPrefix, h.Sum32())
 }
 
 // expandHome expands a leading "~" to the user's home directory.

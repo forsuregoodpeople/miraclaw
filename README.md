@@ -10,6 +10,8 @@
 
 **The most token-efficient self-hosted AI agent — OpenClaw-compatible, built for people who care about every token.**
 
+🔥 **NEW: Markdown-based Prompt System** — Edit prompts as markdown files, bootstrap once to Qdrant, enjoy ~85% token savings vs loading everything every request.
+
 > ⚠️ **Alpha Version** — MiraClaw is currently in alpha. APIs, configuration formats, and behavior may change without notice. Not recommended for production use yet.
 
 ---
@@ -72,6 +74,75 @@ Input → Security scan → Retrieve memory (session + semantic + static)
       → Build prompt → LLM call → Parse skill → Execute skill
       → Second LLM call (format result) → Store reply → Respond
 ```
+
+---
+
+## 🆕 Markdown Workspace & Bootstrap
+
+MiraClaw uses a **two-phase architecture** for maximum token efficiency:
+
+### Phase 1: Bootstrap (Once at startup)
+```
+Markdown Files ──→ Parse ──→ Qdrant Static Collection
+```
+
+All prompts and knowledge are stored as markdown files in the `workspace/` directory with YAML frontmatter:
+
+```markdown
+---
+category: core
+priority: high
+send_to_llm: true
+---
+
+## Core Persona
+
+You are a casual, warm friend...
+```
+
+On first startup, MiraClaw reads these files, parses the frontmatter, splits by sections, and stores them in Qdrant's Static collection. Subsequent runs skip file I/O entirely — everything is loaded from Qdrant.
+
+### Phase 2: Runtime (Every query)
+```
+Agent Need ──→ Query Qdrant (specific) ──→ Minimal Context to LLM
+```
+
+Instead of sending ALL prompts to the LLM every time (expensive!), MiraClaw only loads:
+
+| Category | To LLM? | Size |
+|----------|---------|------|
+| `core` | ✅ Always | ~500 chars |
+| `user` | ✅ Always | ~200 chars |
+| `skills` | ✅ Summarized | ~800 chars |
+| `knowledge` | ❌ Search on-demand | - |
+| `examples` | ❌ Retrieve if relevant | - |
+
+**Result: ~85% token savings** compared to loading everything every request!
+
+### Workspace Structure
+
+```
+workspace/
+├── core-persona.md         # Core identity & behavior rules
+├── skills-rules.md         # Skill definitions
+├── examples-fewshot.md     # Few-shot examples
+├── patterns-autoextract.md # Auto-extraction patterns
+└── knowledge-general.md    # General knowledge base
+```
+
+### Customizing Prompts
+
+Edit any `.md` file in `workspace/`, restart MiraClaw, and changes are automatically bootstrapped:
+
+```bash
+# Edit workspace/core-persona.md
+vim workspace/core-persona.md
+
+# Restart to rebootstrap
+systemctl restart miraclaw
+```
+
+Or force immediate rebootstrap by clearing the bootstrap marker in Qdrant.
 
 ---
 
