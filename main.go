@@ -124,17 +124,10 @@ func main() {
 			}
 		}
 
-		// Flush pending system_prompt from setup wizard into Qdrant static, then clear it from config
+		// NOTE: SystemPrompt is now always loaded from config.yaml
+		// Previously it was flushed to Qdrant, but user wants it always from config
 		if cfg.Agent.SystemPrompt != "" {
-			if err := mem.AddStatic(ctx, "setup-persona", cfg.Agent.SystemPrompt, "agentmd"); err != nil {
-				log.Printf("warn: flush system_prompt to qdrant: %v", err)
-			} else {
-				log.Printf("Persona flushed to Qdrant static knowledge")
-				cfg.Agent.SystemPrompt = ""
-				if err := config.Save(cfg); err != nil {
-					log.Printf("warn: save config after persona flush: %v", err)
-				}
-			}
+			log.Printf("Custom system prompt loaded from config")
 		}
 
 		// Activate memory encryption if passphrase is configured
