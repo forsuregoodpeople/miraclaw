@@ -10,7 +10,7 @@ const SkillRulesHeader = "You have skills. Available skills:"
 const SkillRuleExec = `(1) exec: output ONLY SKILL:exec:<command> — no preamble. Use for ALL system commands: ls, date, df -h, etc. Multi-step: combine with && e.g. SKILL:exec:cd /home && ls -la`
 
 // SkillRuleMemory defines the memory skills rules.
-const SkillRuleMemory = `(2) Memory skills (remember, set_identity): add on its own line — runs silently. CRITICAL: When user shares name, how they want to be called, preferences, likes/dislikes, personal info → YOU MUST include SKILL:remember:<fact> on its own line in your reply!`
+const SkillRuleMemory = `(2) SKILL:remember (MUST USE!): When user shares personal info, name, preferences, or how they want to be called → ADD SKILL:remember:<fact> ON ITS OWN LINE at the END of your reply! This saves the info permanently.`
 
 // SkillRuleGetIdentity defines the get_identity skill.
 const SkillRuleGetIdentity = `(3) get_identity: User asks about your name/identity.`
@@ -25,34 +25,34 @@ const SkillRuleCreateSchedule = `(5) create_schedule: SKILL:create_schedule:<5-f
 const SkillRuleConfirmSudo = `(6) confirm_sudo: BEFORE running any sudo/privileged command → use SKILL:confirm_sudo:<command>. NEVER use exec directly for sudo or root-level commands.`
 
 // SkillRuleNeverRefuse defines the general rule.
-const SkillRuleNeverRefuse = `(7) NEVER refuse to use a skill when it matches what the user wants.`
+const SkillRuleNeverRefuse = `(7) NEVER refuse to use a skill when it matches what the user wants. FORGETTING to use SKILL:remember = user info is LOST!`
 
-// MemorySkillExamples provides concrete examples.
-const MemorySkillExamples = `    Examples: User says 'panggil aku bos' → reply naturally then add line: SKILL:remember:user wants to be called bos
-    Examples: User says 'saya suka kopi' → reply naturally then add line: SKILL:remember:user likes coffee`
+// MemorySkillExamples provides concrete examples inline.
+const MemorySkillExamples = `Examples: User "panggil aku bos" → Reply + SKILL:remember:user wants to be called bos | User "nama saya Budi" → Reply + SKILL:remember:user's name is Budi`
 
 // FewShotHeader introduces the examples section.
-const FewShotHeader = "\nFEW-SHOT EXAMPLES — You MUST follow this pattern:\n"
+const FewShotHeader = "\nFEW-SHOT EXAMPLES — You MUST follow this pattern (SKILL:remember at the END):\n"
 
 // FewShotExamples contains concrete response examples.
-const FewShotExamples = `Example 1:
+const FewShotExamples = `Example 1 (CORRECT - includes SKILL:remember):
 User: panggil saya bos ya
 Assistant: Oke, siap Bos! 👍
 
 SKILL:remember:user wants to be called bos
-Example 2:
+
+Example 2 (CORRECT - includes SKILL:remember):
 User: nama saya Budi
 Assistant: Hai Budi! Senang kenal kamu 😊
 
 SKILL:remember:user's name is Budi
-Example 3:
-User: saya suka makan pedas
-Assistant: Wih, sama dong! 🔥
 
-SKILL:remember:user likes spicy food`
+Example 3 (WRONG - missing SKILL:remember - info LOST!):
+User: panggil saya bos ya
+Assistant: Oke, siap Bos! 👍
+❌ ERROR: No SKILL:remember line! User info NOT saved!`
 
 // SkillSilentReminder reminds about silent execution.
-const SkillSilentReminder = "REMEMBER: The SKILL:remember line is HIDDEN from user — it runs silently!\n"
+const SkillSilentReminder = "⚠️ CRITICAL: The SKILL:remember line is HIDDEN from user and runs silently! ALWAYS include it when user shares info about themselves!\n"
 
 // SkillFormattingHeader for raw skills.
 const SkillFormattingHeader = "The user ran a shell command and got the output below. Write a SHORT human-friendly explanation (1-2 sentences) of what the output means. Do NOT repeat or re-show the output — just explain it naturally.\n"
