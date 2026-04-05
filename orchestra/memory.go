@@ -26,14 +26,21 @@ type MemoryCollections struct {
 }
 
 type Memory struct {
-	client      *qclient.Client
-	collections MemoryCollections
-	embedder    Embedder
-	enc         textCodec
+	client           *qclient.Client
+	collections      MemoryCollections
+	embedder         Embedder
+	enc              textCodec
+	shortTermTTLDays int
 }
 
 func (m *Memory) SetEncryptor(enc textCodec) {
 	m.enc = enc
+}
+
+// SetShortTermTTL configures automatic pruning of ShortTerm entries older than
+// the given number of days on each CloseSession call. 0 disables pruning.
+func (m *Memory) SetShortTermTTL(days int) {
+	m.shortTermTTLDays = days
 }
 
 func NewMemory(host string, port int, cols MemoryCollections, embedder Embedder) (*Memory, error) {
@@ -257,6 +264,12 @@ func (m *Memory) CloseSession(ctx context.Context, channelID string) error {
 		}
 	}
 
+	// Auto-promote important messages before clearing session.
+	if _, err := m.AutoPromoteImportant(ctx); err != nil {
+		log.Printf("warn: auto-promote during close: %v", err)
+		// non-fatal: session close continues
+	}
+
 	_, err = m.client.Delete(ctx, &qclient.DeletePoints{
 		CollectionName: m.collections.Session,
 		Points: qclient.NewPointsSelectorFilter(&qclient.Filter{
@@ -267,6 +280,11 @@ func (m *Memory) CloseSession(ctx context.Context, channelID string) error {
 	})
 	if err != nil {
 		return fmt.Errorf("close session: %w", err)
+	}
+	if m.shortTermTTLDays > 0 {
+		if err := m.PruneShortTerm(ctx, m.shortTermTTLDays); err != nil {
+			log.Printf("warn: prune short-term: %v", err)
+		}
 	}
 	return nil
 }
@@ -342,6 +360,24 @@ func (m *Memory) PromoteToLongTerm(ctx context.Context, msgID string) error {
 	return nil
 }
 
+// importantKeywords is the list of keywords that trigger auto-promotion to LongTerm.
+var importantKeywords = []string{
+	"nama", "name", "alamat", "address", "telepon", "phone",
+	"email", "ultah", "birthday", "suka", "like", "kerja", "work",
+	"tinggal", "live", "important", "penting", "remember", "ingat",
+}
+
+// IsImportantText reports whether the given text contains any importance keyword.
+func IsImportantText(text string) bool {
+	lower := strings.ToLower(text)
+	for _, kw := range importantKeywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // AutoPromoteImportant scans short_term and promotes messages with important keywords to long_term.
 func (m *Memory) AutoPromoteImportant(ctx context.Context) (int, error) {
 	var bigLimit uint32 = 1000
@@ -355,26 +391,12 @@ func (m *Memory) AutoPromoteImportant(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("scan short-term: %w", err)
 	}
 
-	importantKeywords := []string{
-		"nama", "name", "alamat", "address", "telepon", "phone",
-		"email", "ultah", "birthday", "suka", "like", "kerja", "work",
-		"tinggal", "live", "important", "penting", "remember", "ingat",
-	}
-
 	promoted := 0
 	for _, r := range results {
 		p := r.GetPayload()
-		text := strings.ToLower(p["text"].GetStringValue())
-		
-		isImportant := false
-		for _, kw := range importantKeywords {
-			if strings.Contains(text, kw) {
-				isImportant = true
-				break
-			}
-		}
-		
-		if isImportant {
+		text := p["text"].GetStringValue()
+
+		if IsImportantText(text) {
 			vec := vectorOutputToFloat32(r.GetVectors())
 			if vec == nil {
 				continue
@@ -399,6 +421,28 @@ func (m *Memory) AutoPromoteImportant(ctx context.Context) (int, error) {
 		log.Printf("[Memory] Auto-promoted %d messages to long-term", promoted)
 	}
 	return promoted, nil
+}
+
+// PruneShortTerm deletes ShortTerm entries older than the given number of days.
+// If days <= 0, it is a no-op.
+func (m *Memory) PruneShortTerm(ctx context.Context, days int) error {
+	if days <= 0 {
+		return nil
+	}
+	cutoff := float64(time.Now().Add(-time.Duration(days) * 24 * time.Hour).UnixNano())
+	_, err := m.client.Delete(ctx, &qclient.DeletePoints{
+		CollectionName: m.collections.ShortTerm,
+		Points: qclient.NewPointsSelectorFilter(&qclient.Filter{
+			Must: []*qclient.Condition{
+				qclient.NewRange("ts", &qclient.Range{Lt: &cutoff}),
+			},
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("prune short-term: %w", err)
+	}
+	log.Printf("[Memory] Pruned short-term entries older than %d days", days)
+	return nil
 }
 
 // ClearAll deletes and recreates all memory collections, wiping all stored data.

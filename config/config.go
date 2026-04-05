@@ -35,7 +35,8 @@ type Agent struct {
 	MaxSummaryLen      int    `yaml:"max_summary_len"`
 	MaxInputLen        int    `yaml:"max_input_len"`
 	MaxSkillDescLen    int    `yaml:"max_skill_desc_len"`
-	ContextWindow      int    `yaml:"context_window"` // max estimated tokens sent to LLM (0 = unlimited)
+	ContextWindow      int    `yaml:"context_window"`       // max estimated tokens sent to LLM (0 = unlimited)
+	ShortTermTTLDays   int    `yaml:"short_term_ttl_days"`  // days before ShortTerm entries are pruned (0 = disabled)
 }
 
 type Security struct {
@@ -90,14 +91,15 @@ func DefaultConfig() *Config {
 		Agent: Agent{
 			BotName:            "Mira",
 			AgentMD:            "~/.miraclaw/AGENT.md",
-			MaxContextMessages: 2,
+			MaxContextMessages: 10,
 			MaxHistoryTurns:    6,
-			MaxMessageLen:      120,
+			MaxMessageLen:      400,
 			MaxOutputTokens:    1024,
 			MaxSummaryLen:      200,
 			MaxInputLen:        400,
 			MaxSkillDescLen:    40,
 			ContextWindow:      4096,
+			ShortTermTTLDays:   7,
 		},
 		LLM: LLMConfig{
 			Provider: "openai",

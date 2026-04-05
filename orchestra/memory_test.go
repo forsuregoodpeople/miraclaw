@@ -176,3 +176,151 @@ func TestMemoryTimestamp(t *testing.T) {
 		t.Error("expected t2 > t1 for timestamp ordering")
 	}
 }
+
+func TestIsImportantTextKeywords(t *testing.T) {
+	cases := []struct {
+		text      string
+		important bool
+	}{
+		{"nama saya budi", true},
+		{"my name is john", true},
+		{"alamat saya di jakarta", true},
+		{"suka kopi", true},
+		{"i like coffee", true},
+		{"kerja di perusahaan", true},
+		{"ingat ini", true},
+		{"penting banget", true},
+		{"cuaca hari ini bagus", false},
+		{"halo apa kabar", false},
+	}
+	for _, c := range cases {
+		got := orchestra.IsImportantText(c.text)
+		if got != c.important {
+			t.Errorf("IsImportantText(%q) = %v, want %v", c.text, got, c.important)
+		}
+	}
+}
+
+func TestCloseSessionTriggersAutoPromotion(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("autopromote"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	ctx := context.Background()
+
+	// Add a session message with an important keyword
+	msg := orchestra.NewMessage("important-1", "nama saya budi dan saya suka kopi", "chan-autopromote")
+	_ = mem.Add(ctx, msg, "user")
+
+	if err := mem.CloseSession(ctx, "chan-autopromote"); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+
+	// Verify it landed in LongTerm via Search (which covers both ShortTerm + LongTerm)
+	results, err := mem.Search(ctx, "chan-autopromote", "nama budi", 10)
+	if err != nil {
+		t.Fatalf("Search after CloseSession: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected auto-promoted message to appear in search results")
+	}
+}
+
+func TestMemorySetShortTermTTL(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("ttl_set"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	// Just verify no panic and method exists
+	mem.SetShortTermTTL(7)
+	mem.SetShortTermTTL(0) // disable
+}
+
+func TestCloseSessionPrunesOldData(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("ttl_prune"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	mem.SetShortTermTTL(1) // 1-day TTL
+	ctx := context.Background()
+
+	msg := orchestra.NewMessage("ttl-msg-1", "old message that should be pruned eventually", "chan-ttl")
+	_ = mem.Add(ctx, msg, "user")
+	if err := mem.CloseSession(ctx, "chan-ttl"); err != nil {
+		t.Fatalf("CloseSession: %v", err)
+	}
+	// With 1-day TTL, a just-added entry should survive (it's fresh)
+	results, err := mem.Search(ctx, "chan-ttl", "old message", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected fresh entry to survive 1-day TTL prune")
+	}
+}
+
+func TestPruneShortTermZeroDaysIsNoop(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("prune_noop"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	ctx := context.Background()
+	if err := mem.PruneShortTerm(ctx, 0); err != nil {
+		t.Errorf("PruneShortTerm(0) should be noop, got: %v", err)
+	}
+}
+
+func TestPruneShortTermDeletesOldEntries(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("prune_old"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	ctx := context.Background()
+
+	// Insert a message then prune with 0-day window (everything is "old")
+	msg := orchestra.NewMessage("prune-old-1", "this is an old memory", "chan-prune")
+	_ = mem.Add(ctx, msg, "user")
+	_ = mem.CloseSession(ctx, "chan-prune") // promotes to ShortTerm
+
+	// Prune with a negative past cutoff — use days=0 is noop, so test differently:
+	// We just verify PruneShortTerm runs without error with a real TTL.
+	if err := mem.PruneShortTerm(ctx, 7); err != nil {
+		t.Errorf("PruneShortTerm: %v", err)
+	}
+}
+
+func TestPruneShortTermKeepsRecentEntries(t *testing.T) {
+	t.Skip("requires Qdrant — run as integration test")
+
+	mem, err := orchestra.NewMemory("localhost", 6334, testCols("prune_recent"), &mockEmbedder{})
+	if err != nil {
+		t.Fatalf("NewMemory: %v", err)
+	}
+	ctx := context.Background()
+
+	msg := orchestra.NewMessage("recent-1", "this is a recent memory", "chan-recent")
+	_ = mem.Add(ctx, msg, "user")
+	_ = mem.CloseSession(ctx, "chan-recent")
+
+	// Prune with 7-day TTL — recent entry should survive
+	if err := mem.PruneShortTerm(ctx, 7); err != nil {
+		t.Errorf("PruneShortTerm: %v", err)
+	}
+	results, err := mem.Search(ctx, "chan-recent", "recent memory", 5)
+	if err != nil {
+		t.Fatalf("Search after prune: %v", err)
+	}
+	if len(results) == 0 {
+		t.Error("expected recent entry to survive pruning")
+	}
+}

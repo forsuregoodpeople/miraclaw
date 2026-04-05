@@ -56,3 +56,47 @@ func TestTelegramStructHasPairedChatID(t *testing.T) {
 		t.Error("PairedChatID field not accessible")
 	}
 }
+
+func TestDefaultConfigMaxMessageLen(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.Agent.MaxMessageLen != 400 {
+		t.Errorf("expected MaxMessageLen 400, got %d", cfg.Agent.MaxMessageLen)
+	}
+}
+
+func TestDefaultConfigMaxContextMessages(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.Agent.MaxContextMessages != 10 {
+		t.Errorf("expected MaxContextMessages 10, got %d", cfg.Agent.MaxContextMessages)
+	}
+}
+
+func TestDefaultConfigShortTermTTLDays(t *testing.T) {
+	cfg := config.DefaultConfig()
+	if cfg.Agent.ShortTermTTLDays != 7 {
+		t.Errorf("expected ShortTermTTLDays 7, got %d", cfg.Agent.ShortTermTTLDays)
+	}
+}
+
+func TestLoadConfigOldFileMissingShortTermTTL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Write a config.yaml without short_term_ttl_days
+	dir := filepath.Join(home, ".miraclaw")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	yaml := "agent:\n  bot_name: TestBot\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Agent.ShortTermTTLDays != 7 {
+		t.Errorf("expected ShortTermTTLDays default 7 for old config, got %d", loaded.Agent.ShortTermTTLDays)
+	}
+}

@@ -69,6 +69,10 @@ func (f *fakeMemory) ClearAll(_ context.Context) error {
 	return nil
 }
 
+func (f *fakeMemory) PruneShortTerm(_ context.Context, _ int) error {
+	return nil
+}
+
 // Verify fakeMemory satisfies AgentMemory interface.
 var _ orchestra.AgentMemory = (*fakeMemory)(nil)
 
@@ -297,6 +301,69 @@ func TestAgentAddBotReplyErrorDoesNotPropagate(t *testing.T) {
 	}
 	if reply != "hi" {
 		t.Errorf("expected reply 'hi', got %q", reply)
+	}
+}
+
+// TestAutoExtractPreference* tests use ExtractPreference (synchronous wrapper).
+
+func TestAutoExtractPreferenceNameDeclaration(t *testing.T) {
+	mem := &fakeMemory{}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, &mockLLM{response: "ok"}, sys, orchestra.AgentConfig{})
+
+	msg := orchestra.NewMessage("id", "nama saya Budi", "chan")
+	agent.ExtractPreference(context.Background(), msg)
+
+	if len(mem.staticAdded) == 0 {
+		t.Fatal("expected a preference to be extracted")
+	}
+	if !strings.Contains(mem.staticAdded[0].text, "Budi") {
+		t.Errorf("expected extracted fact to contain 'Budi', got %q", mem.staticAdded[0].text)
+	}
+}
+
+func TestAutoExtractPreferenceEnglishLike(t *testing.T) {
+	mem := &fakeMemory{}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, &mockLLM{response: "ok"}, sys, orchestra.AgentConfig{})
+
+	msg := orchestra.NewMessage("id", "i like basketball", "chan")
+	agent.ExtractPreference(context.Background(), msg)
+
+	if len(mem.staticAdded) == 0 {
+		t.Fatal("expected a preference to be extracted")
+	}
+	if !strings.Contains(mem.staticAdded[0].text, "basketball") {
+		t.Errorf("expected extracted fact to contain 'basketball', got %q", mem.staticAdded[0].text)
+	}
+}
+
+func TestAutoExtractPreferenceNoMatch(t *testing.T) {
+	mem := &fakeMemory{}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, &mockLLM{response: "ok"}, sys, orchestra.AgentConfig{})
+
+	msg := orchestra.NewMessage("id", "what's the weather today", "chan")
+	agent.ExtractPreference(context.Background(), msg)
+
+	if len(mem.staticAdded) != 0 {
+		t.Errorf("expected no extraction, got %d entries", len(mem.staticAdded))
+	}
+}
+
+func TestAutoExtractPreferenceMidSentence(t *testing.T) {
+	mem := &fakeMemory{}
+	sys := orchestra.NewSystem(orchestra.SystemConfig{})
+	agent := orchestra.NewAgent(mem, &mockLLM{response: "ok"}, sys, orchestra.AgentConfig{})
+
+	msg := orchestra.NewMessage("id", "oh ya, saya suka kopi", "chan")
+	agent.ExtractPreference(context.Background(), msg)
+
+	if len(mem.staticAdded) == 0 {
+		t.Fatal("expected mid-sentence pattern to be extracted via contains matching")
+	}
+	if !strings.Contains(mem.staticAdded[0].text, "kopi") {
+		t.Errorf("expected extracted fact to contain 'kopi', got %q", mem.staticAdded[0].text)
 	}
 }
 

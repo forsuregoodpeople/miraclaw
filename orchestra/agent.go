@@ -19,6 +19,9 @@ type AgentMemory interface {
 	SearchStatic(ctx context.Context, channelID, query string, topN uint64) ([]*Message, error)
 	AddStatic(ctx context.Context, id, text, category string) error
 	GetStaticByCategory(ctx context.Context, category string) ([]*Message, error)
+	PruneShortTerm(ctx context.Context, days int) error
+	PromoteToLongTerm(ctx context.Context, msgID string) error
+	ClearAll(ctx context.Context) error
 }
 
 type AgentConfig struct {
@@ -32,6 +35,7 @@ type AgentConfig struct {
 	MaxInputLen        int                // max chars for user input before truncation
 	MaxSkillDescLen    int                // max chars per skill description
 	ContextWindow      int                // max estimated input tokens for buildMessages; 0 = no limit
+	ShortTermTTLDays   int                // passed through from config; informational only (enforced in Memory)
 	TextScanner        func(string) error // optional: security.ScanText
 }
 
@@ -82,11 +86,12 @@ func (a *Agent) Reply(ctx context.Context, msg *Message) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get session: %w", err)
 	}
+	log.Printf("[DEBUG] Retrieved %d session messages for channel %s", len(session), msg.ChannelID)
 
 	// 4. Query Qdrant: semantic search (short-term + long-term)
 	maxCtx := a.cfg.MaxContextMessages
 	if maxCtx <= 0 {
-		maxCtx = 2
+		maxCtx = 10
 	}
 	related, err := a.memory.Search(ctx, msg.ChannelID, msg.Text, uint64(maxCtx))
 	if err != nil {
@@ -522,6 +527,7 @@ func (a *Agent) buildMessagesEfficient(ctx context.Context, input string, sessio
 			Content: trunc(m.Text, maxInput),
 		})
 	}
+	log.Printf("[DEBUG] Built %d session messages", len(sessionMsgs))
 
 	// ── Segment 4: Current user input ────────────────────────────────────────
 	inputMsg := []ChatMessage{{Role: "user", Content: trunc(input, maxInput)}}
@@ -530,20 +536,31 @@ func (a *Agent) buildMessagesEfficient(ctx context.Context, input string, sessio
 	if budget := a.cfg.ContextWindow; budget > 0 {
 		fixed := estimateTokens(systemMsgs) + estimateTokens(inputMsg)
 		remaining := budget - fixed
+		log.Printf("[DEBUG] ContextWindow budget: %d, fixed: %d, remaining: %d", budget, fixed, remaining)
 		
 		// Knowledge messages trimmed first
+		knowledgeBefore := len(knowledgeMsgs)
 		for len(knowledgeMsgs) > 0 && estimateTokens(knowledgeMsgs) > remaining {
 			knowledgeMsgs = knowledgeMsgs[:len(knowledgeMsgs)-1]
+		}
+		if len(knowledgeMsgs) < knowledgeBefore {
+			log.Printf("[DEBUG] Trimmed knowledge: %d -> %d", knowledgeBefore, len(knowledgeMsgs))
 		}
 		remaining -= estimateTokens(knowledgeMsgs)
 		
 		// Then session history (oldest first)
+		sessionBefore := len(sessionMsgs)
 		for len(sessionMsgs) > 0 && estimateTokens(sessionMsgs) > remaining {
 			sessionMsgs = sessionMsgs[1:]
+		}
+		if len(sessionMsgs) < sessionBefore {
+			log.Printf("[DEBUG] Trimmed session: %d -> %d", sessionBefore, len(sessionMsgs))
 		}
 	}
 
 	// ── Final assembly ───────────────────────────────────────────────────────
+	log.Printf("[DEBUG] Final messages: %d system, %d knowledge, %d session, 1 input", 
+		len(systemMsgs), len(knowledgeMsgs), len(sessionMsgs))
 	var msgs []ChatMessage
 	msgs = append(msgs, systemMsgs...)
 	msgs = append(msgs, knowledgeMsgs...)
@@ -645,29 +662,45 @@ func parseSkillCall(resp string) (name, input string, ok bool) {
 	return n, strings.TrimSpace(input), true
 }
 
-// autoExtractPreference extracts common preference patterns from user message
-// and auto-saves them to memory as a backup when LLM doesn't call SKILL:remember.
-// This runs in background to not block the main flow.
-func (a *Agent) autoExtractPreference(ctx context.Context, msg *Message) {
+// ExtractPreference extracts preference patterns from msg and saves matches to memory.
+// It is exported for synchronous use in tests; Reply() calls it via a goroutine.
+func (a *Agent) ExtractPreference(ctx context.Context, msg *Message) {
 	text := strings.ToLower(strings.TrimSpace(msg.Text))
 	if text == "" {
 		return
 	}
 
+	saveFact := func(label, rawText, matchedPattern string) {
+		value := strings.TrimSpace(rawText[len(matchedPattern):])
+		if value == "" {
+			return
+		}
+		fact := fmt.Sprintf("%s %s", label, value)
+		id := fmt.Sprintf("%s%d", prompts.AutoExtractIDPrefix, time.Now().UnixNano())
+		if err := a.memory.AddStatic(ctx, id, fact, prompts.AutoExtractCategory); err == nil {
+			log.Printf("[AutoExtract] Saved preference: %s", fact)
+		}
+	}
+
 	for _, p := range prompts.AutoExtractPatterns {
+		// Check prefix patterns first (higher specificity)
 		for _, prefix := range p.Prefixes {
 			if strings.HasPrefix(text, prefix) {
-				value := strings.TrimSpace(msg.Text[len(prefix):])
-				if value != "" {
-					// Save to memory
-					fact := fmt.Sprintf("%s %s", p.Label, value)
-					id := fmt.Sprintf("%s%d", prompts.AutoExtractIDPrefix, time.Now().UnixNano())
-					if err := a.memory.AddStatic(ctx, id, fact, prompts.AutoExtractCategory); err == nil {
-						log.Printf("[AutoExtract] Saved preference: %s", fact)
-					}
-					return // Only extract one preference per message
-				}
+				saveFact(p.Label, msg.Text, msg.Text[:len(prefix)])
+				return
+			}
+		}
+		// Check contains patterns (mid-sentence)
+		for _, sub := range p.Contains {
+			if idx := strings.Index(text, sub); idx >= 0 {
+				saveFact(p.Label, msg.Text[idx:], msg.Text[idx:idx+len(sub)])
+				return
 			}
 		}
 	}
+}
+
+// autoExtractPreference is the background goroutine wrapper for ExtractPreference.
+func (a *Agent) autoExtractPreference(ctx context.Context, msg *Message) {
+	a.ExtractPreference(ctx, msg)
 }

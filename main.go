@@ -80,64 +80,69 @@ func main() {
 		log.Fatalf("embedder: %v", err)
 	}
 
-	mem, err := orchestra.NewMemory(cfg.Qdrant.Host, cfg.Qdrant.Port, orchestra.MemoryCollections{
+	var agentMem orchestra.AgentMemory
+	mem, memErr := orchestra.NewMemory(cfg.Qdrant.Host, cfg.Qdrant.Port, orchestra.MemoryCollections{
 		Session:   cfg.Qdrant.CollectionSession,
 		ShortTerm: cfg.Qdrant.CollectionShortTerm,
 		LongTerm:  cfg.Qdrant.CollectionLongTerm,
 		Static:    cfg.Qdrant.CollectionStatic,
 	}, embedder)
-	if err != nil {
-		log.Fatalf("qdrant: %v", err)
-	}
+	if memErr != nil {
+		log.Printf("warn: qdrant unavailable, running without memory: %v", memErr)
+		agentMem = &orchestra.NoOpMemory{}
+	} else {
+		agentMem = mem
+		mem.SetShortTermTTL(cfg.Agent.ShortTermTTLDays)
 
-	// Bootstrap: Load markdown files from workspace into Qdrant (token-efficient)
-	bootstrap := orchestra.NewBootstrap(mem, "./workspace")
-	bootstrapResult, err := bootstrap.Run(ctx)
-	if err != nil {
-		log.Printf("warn: bootstrap failed: %v", err)
-	} else if bootstrapResult.AlreadyBootstrapped {
-		if bootstrapResult.HashMatch {
-			log.Printf("Bootstrap: up to date (%d sections)", bootstrapResult.SectionsStored)
+		// Bootstrap: Load markdown files from workspace into Qdrant (token-efficient)
+		bootstrap := orchestra.NewBootstrap(mem, "./workspace")
+		bootstrapResult, err := bootstrap.Run(ctx)
+		if err != nil {
+			log.Printf("warn: bootstrap failed: %v", err)
+		} else if bootstrapResult.AlreadyBootstrapped {
+			if bootstrapResult.HashMatch {
+				log.Printf("Bootstrap: up to date (%d sections)", bootstrapResult.SectionsStored)
+			} else {
+				log.Printf("Bootstrap: updated (%d files, %d sections)",
+					bootstrapResult.FilesProcessed, bootstrapResult.SectionsStored)
+			}
 		} else {
-			log.Printf("Bootstrap: updated (%d files, %d sections)", 
+			log.Printf("Bootstrap: loaded %d files, %d sections",
 				bootstrapResult.FilesProcessed, bootstrapResult.SectionsStored)
 		}
-	} else {
-		log.Printf("Bootstrap: loaded %d files, %d sections", 
-			bootstrapResult.FilesProcessed, bootstrapResult.SectionsStored)
-	}
 
-	// Seed identity if not exists
-	orchestra.SeedIdentity(ctx, mem, cfg.Agent.BotName)
-	
-	// Load optional user-provided knowledge file
-	if cfg.Agent.AgentMD != "" {
-		if err := orchestra.LoadKnowledgeFile(ctx, cfg.Agent.AgentMD, mem); err != nil {
-			log.Printf("warn: knowledge file: %v", err)
-		}
-	}
+		// Seed identity if not exists
+		orchestra.SeedIdentity(ctx, mem, cfg.Agent.BotName)
 
-	// Flush pending system_prompt from setup wizard into Qdrant static, then clear it from config
-	if cfg.Agent.SystemPrompt != "" {
-		if err := mem.AddStatic(ctx, "setup-persona", cfg.Agent.SystemPrompt, "agentmd"); err != nil {
-			log.Printf("warn: flush system_prompt to qdrant: %v", err)
-		} else {
-			log.Printf("Persona flushed to Qdrant static knowledge")
-			cfg.Agent.SystemPrompt = ""
-			if err := config.Save(cfg); err != nil {
-				log.Printf("warn: save config after persona flush: %v", err)
+		// Load optional user-provided knowledge file
+		if cfg.Agent.AgentMD != "" {
+			if err := orchestra.LoadKnowledgeFile(ctx, cfg.Agent.AgentMD, mem); err != nil {
+				log.Printf("warn: knowledge file: %v", err)
 			}
 		}
-	}
 
-	// Activate memory encryption if passphrase is configured
-	if cfg.Security.EncryptionKey != "" {
-		enc, encErr := security.NewEncryptorFromPassphrase(cfg.Security.EncryptionKey)
-		if encErr != nil {
-			log.Fatalf("encryption init: %v", encErr)
+		// Flush pending system_prompt from setup wizard into Qdrant static, then clear it from config
+		if cfg.Agent.SystemPrompt != "" {
+			if err := mem.AddStatic(ctx, "setup-persona", cfg.Agent.SystemPrompt, "agentmd"); err != nil {
+				log.Printf("warn: flush system_prompt to qdrant: %v", err)
+			} else {
+				log.Printf("Persona flushed to Qdrant static knowledge")
+				cfg.Agent.SystemPrompt = ""
+				if err := config.Save(cfg); err != nil {
+					log.Printf("warn: save config after persona flush: %v", err)
+				}
+			}
 		}
-		mem.SetEncryptor(enc)
-		log.Println("Memory encryption enabled")
+
+		// Activate memory encryption if passphrase is configured
+		if cfg.Security.EncryptionKey != "" {
+			enc, encErr := security.NewEncryptorFromPassphrase(cfg.Security.EncryptionKey)
+			if encErr != nil {
+				log.Fatalf("encryption init: %v", encErr)
+			}
+			mem.SetEncryptor(enc)
+			log.Println("Memory encryption enabled")
+		}
 	}
 
 	rawProvider, err := buildLLM(cfg)
@@ -159,9 +164,13 @@ func main() {
 	})
 
 	skills.RegisterExecSkill(sys)
-	skills.RegisterMemorySkills(sys, mem)
+	if mem != nil {
+		skills.RegisterMemorySkills(sys, mem)
+	} else {
+		skills.RegisterMemorySkills(sys, &orchestra.NoOpMemory{})
+	}
 
-	agent := orchestra.NewAgent(mem, provider, sys, orchestra.AgentConfig{
+	agent := orchestra.NewAgent(agentMem, provider, sys, orchestra.AgentConfig{
 		BotName:            cfg.Agent.BotName,
 		SystemPrompt:       cfg.Agent.SystemPrompt,
 		MaxContextMessages: cfg.Agent.MaxContextMessages,
@@ -172,6 +181,7 @@ func main() {
 		MaxInputLen:        cfg.Agent.MaxInputLen,
 		MaxSkillDescLen:    cfg.Agent.MaxSkillDescLen,
 		ContextWindow:      cfg.Agent.ContextWindow,
+		ShortTermTTLDays:   cfg.Agent.ShortTermTTLDays,
 		TextScanner:        security.ScanText,
 	})
 
@@ -179,7 +189,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("telegram: %v", err)
 	}
-	ch.SetMemory(mem)
+	ch.SetMemory(agentMem)
 
 	botCfg := &channels.BotConfig{
 		Provider: cfg.LLM.Provider,
@@ -193,7 +203,7 @@ func main() {
 	cmdHandler := channels.NewCommandHandler(
 		botCfg,
 		func(ctx context.Context, channelID string) error {
-			return mem.CloseSession(ctx, channelID)
+			return agentMem.CloseSession(ctx, channelID)
 		},
 		func(model string) error {
 			cfg.LLM.Model = model
@@ -207,7 +217,12 @@ func main() {
 		},
 		listFn,
 	)
-	cmdHandler.SetMemory(mem)
+	// Set memory for command handler (use concrete type *Memory, not interface)
+	if mem != nil {
+		cmdHandler.SetMemory(mem)
+	} else {
+		cmdHandler.SetMemory(&orchestra.NoOpMemory{})
+	}
 	ch.SetCommands(cmdHandler)
 
 	if cfg.Telegram.PairingID != "" {
@@ -234,7 +249,7 @@ func main() {
 		return config.Save(cfg)
 	}
 	skills.RegisterScheduleSkills(sys, sched, cfg.Telegram.PairedChatID, schedSaveFn)
-	skills.RegisterPlanSkills(sys, mem)
+	skills.RegisterPlanSkills(sys, agentMem)
 
 	sched.Start(ctx)
 

@@ -4,10 +4,13 @@
 package prompts
 
 // PreferencePattern defines a pattern for auto-extraction.
+// Prefixes are checked first (anchor match); Contains are checked second (substring match).
+// Only the first matching pattern per message is used.
 type PreferencePattern struct {
-	Prefixes   []string
-	Label      string
-	Category   string
+	Prefixes []string
+	Contains []string // substring patterns checked after Prefixes
+	Label    string
+	Category string
 }
 
 // AutoExtractPatterns contains all patterns for automatic preference extraction.
@@ -60,6 +63,36 @@ var AutoExtractPatterns = []PreferencePattern{
 		Prefixes:   []string{"saya kerja di ", "aku kerja di ", "saya bekerja di ", "i work at "},
 		Label:      "user works at",
 		Category:   "work",
+	},
+	// Contains-based Like Patterns (mid-sentence)
+	{
+		Contains: []string{"saya suka ", "aku suka ", "gue suka ", "i like ", "i love "},
+		Label:    "user likes",
+		Category: "likes",
+	},
+	// Contains-based Dislike Patterns (mid-sentence)
+	{
+		Contains: []string{"saya tidak suka ", "aku tidak suka ", "i don't like ", "i dislike ", "i hate "},
+		Label:    "user dislikes",
+		Category: "dislikes",
+	},
+	// Contains-based Location Patterns (mid-sentence)
+	{
+		Contains: []string{"saya tinggal di ", "aku tinggal di ", "i live in "},
+		Label:    "user lives in",
+		Category: "location",
+	},
+	// Has / Owns Patterns
+	{
+		Contains: []string{"saya punya ", "aku punya ", "i have "},
+		Label:    "user has",
+		Category: "owns",
+	},
+	// Origin Patterns
+	{
+		Contains: []string{"saya orang ", "i am from ", "i'm from "},
+		Label:    "user is from",
+		Category: "origin",
 	},
 }
 
