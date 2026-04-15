@@ -1,0 +1,1 @@
+ALTER TABLE mikrotik_static_bindings ADD COLUMN IF NOT EXISTS is_online BOOLEAN NOT NULL DEFAULT FALSE;

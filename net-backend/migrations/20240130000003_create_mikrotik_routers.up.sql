@@ -1,0 +1,12 @@
+CREATE TABLE IF NOT EXISTS mikrotik_routers (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    host VARCHAR(255) NOT NULL,
+    port INT DEFAULT 8728,
+    username VARCHAR(255) NOT NULL,
+    password VARCHAR(255) NULL,
+    mitra_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_mikrotik_mitra_id ON mikrotik_routers(mitra_id);

@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS wa_queue;
+DROP TABLE IF EXISTS wa_settings;
+DROP TABLE IF EXISTS wa_sessions;

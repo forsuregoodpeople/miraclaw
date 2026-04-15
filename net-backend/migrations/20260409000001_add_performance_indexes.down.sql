@@ -1,0 +1,11 @@
+DROP INDEX IF EXISTS idx_users_username;
+DROP INDEX IF EXISTS idx_users_email;
+DROP INDEX IF EXISTS idx_users_parent_id;
+DROP INDEX IF EXISTS idx_users_role;
+DROP INDEX IF EXISTS idx_customers_router_id;
+DROP INDEX IF EXISTS idx_customers_package_id;
+DROP INDEX IF EXISTS idx_customers_is_active;
+DROP INDEX IF EXISTS idx_wa_queue_status_scheduled;
+DROP INDEX IF EXISTS idx_wa_queue_mitra_id;
+DROP INDEX IF EXISTS idx_finance_invoices_customer_id;
+DROP INDEX IF EXISTS idx_finance_invoices_billing_period;

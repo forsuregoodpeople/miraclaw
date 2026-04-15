@@ -1,0 +1,76 @@
+server:
+  host: 0.0.0.0
+  port: 3003
+  idle_timeout_seconds: 3600
+  read_timeout_seconds: 300
+  write_timeout_seconds: 300
+
+logging:
+  level: debug
+  format: text
+  colors: true
+  enable_info: true
+  enable_debug: true
+  enable_error: true
+  websocket:
+    enable_redis_log: true
+    enable_broadcast_log: true
+
+jwt:
+  secret: "6049776d67af812e52382bb4f95f0466db6b43d45fc1faead694ee48c9b89147" 
+  expiration_hours: 72
+
+database:
+  host: localhost
+  port: 5432
+  name: net-backend
+  user: postgres
+  password:
+
+redis:
+  host: 127.0.0.1
+  port: 6379
+  password: ""
+  db: 0
+  timeout_seconds: 10
+  cache_ttl_minutes: 5
+  update_timeout_seconds: 30
+
+websocket:
+  buffer_size: 5000
+  ping_interval_seconds: 30
+  pong_wait_seconds: 90
+  write_wait_seconds: 20
+
+cors:
+  allowed_origins: "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000,http://127.0.0.1:3001,http://43.133.141.113:3000,http://43.133.141.113:3001"
+
+monitoring:
+  interval_ms: 5000
+  max_errors: 5
+  error_backoff_seconds: 60
+  batch_size: 40
+  session_timeout_seconds: 45
+  observer_timeout_seconds: 90
+  scheduler_interval_seconds: 30
+
+mikrotik:
+  connection_pool:
+    max_per_router: 6
+    idle_timeout_seconds: 600
+    dial_timeout_seconds: 15
+    max_retries: 5
+
+
+packages:
+  sync_interval_minutes: 15
+
+cleanup:
+  check_interval_seconds: 300
+  check_timeout_seconds: 30
+  stuck_threshold_seconds: 120
+  get_router_timeout_seconds: 5
+  max_retries: 3
+  retry_delay_seconds: 2
+  ping_timeout_seconds: 10
+  update_status_timeout_seconds: 10

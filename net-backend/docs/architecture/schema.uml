@@ -1,0 +1,71 @@
+@startuml
+skinparam componentStyle rectangle
+skinparam linetype ortho
+top to bottom direction
+
+'--- Styling ---
+skinparam package {
+    BackgroundColor White
+    BorderColor Black
+}
+skinparam component {
+    BackgroundColor #F1F1F1
+    BorderColor Black
+    ArrowColor Black
+}
+
+'--- Components ---
+
+component "Frontend (Remix.js)\nReal-time Dashboard" as Frontend
+
+component "API Gateway\n(Go REST API)" as Gateway
+
+package "Service Layer (Go)" {
+    component "Device Service"
+    component "Monitoring Service"
+    component "Alert Service"
+}
+
+component "WebSocket Hub\n(Real-time updates)" as WSHub
+
+package "Repository Layer" {
+    database "Redis Cache/Queue" as Redis
+    database "PostgreSQL (optional)" as Postgres
+}
+
+component "Event Processor\n(Go Routines)" as EventProcessor
+
+package "Worker Layer (Go)" {
+    component "MikroTik Collector"
+    component "GenieACS Collector"
+    component "Metrics Processor"
+}
+
+package "External Systems" {
+    component "MikroTik RouterOS"
+    component "GenieACS Server"
+}
+
+'--- Relationships ---
+
+Frontend --> Gateway : WebSocket/REST
+
+Gateway --> "Service Layer (Go)" : REST
+Gateway --> WSHub : WebSocket
+
+"Service Layer (Go)" --> "Repository Layer"
+
+' Menghubungkan Hub ke Event Processor (Visual Alignment)
+WSHub -[hidden]-> EventProcessor
+WSHub <--> EventProcessor : Pub/Sub
+
+' Repository ke Worker
+"Repository Layer" <--> "Worker Layer (Go)" : Queue/Cache
+
+' Worker ke External
+"Worker Layer (Go)" --> "External Systems" : Fetch/Poll
+
+' Event Processor Interaction (Optional logic based on typical Go Architecture)
+EventProcessor ..> Redis : Subscribe Events
+
+@enduml
